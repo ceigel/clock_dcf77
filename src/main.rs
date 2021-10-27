@@ -9,7 +9,6 @@ use feather_f405::{hal::prelude::*, pac, setup_clocks};
 use rtic::app;
 use rtt_target::{rprintln, rtt_init_print};
 use stm32f4xx_hal::gpio::{gpioa, gpioc, Alternate, Output, PushPull, AF2};
-use stm32f4xx_hal::time::Hertz;
 
 #[app(device = feather_f405::hal::stm32, monotonic = rtic::cyccnt::CYCCNT, peripherals = true)]
 const APP: () = {
@@ -40,11 +39,10 @@ const APP: () = {
         let gpioc = device.GPIOC.split();
         let output_pin = gpioc.pc6.into_push_pull_output();
         let timer = device.TIM3;
-        let clock_freq: Hertz = 10.khz().into();
-        let psc = ((2 * clocks.pclk1().0) / clock_freq.0 as u32) as u16 - 1;
+        let psc = ((2 * clocks.pclk1().0) / 10000 as u32) as u16 - 1;
 
         timer.psc.write(|w| w.psc().bits(psc));
-        timer.arr.write(|w| w.arr().bits(10_000));
+        timer.arr.write(|w| w.arr().bits(u16::MAX));
 
         timer.cr1.modify(|_, w| w.urs().set_bit());
         timer.egr.write(|w| w.ug().set_bit());
@@ -52,14 +50,23 @@ const APP: () = {
 
         timer.ccmr1_input().write(|w| {
             w.cc1s().ti1();
+            w.cc2s().ti1();
             w.ic1f().fdts_div32_n8();
             w
         });
 
         timer.ccer.write(|w| {
             w.cc1p().set_bit();
-            w.cc1np().clear_bit();
-            w.cc1e().set_bit();
+            w.cc1np().clear_bit(); //active falling edge
+            w.cc2p().clear_bit();
+            w.cc2np().clear_bit(); // active raising edge
+            w.cc1e().set_bit(); // enable captures
+            w.cc2e().set_bit();
+            w
+        });
+        timer.smcr.write(|w| {
+            w.sms().reset_mode();
+            w.ts().ti1fp1();
             w
         });
         timer.dier.write(|w| w.cc1ie().set_bit());
@@ -87,6 +94,7 @@ const APP: () = {
         let timer: &mut pac::TIM3 = cx.resources.timer;
         let capture = timer.ccr1.read().bits();
         let flags = timer.sr.read().bits();
+        timer.egr.write(|w| w.ug().set_bit());
         timer.sr.modify(|_, w| {
             w.uif().clear_bit();
             w.tif().clear_bit();
