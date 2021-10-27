@@ -1,0 +1,28 @@
+[package]
+# TODO(1) fix `authors` and `name` if you didn't use `cargo-generate`
+authors = ["Cristian Eigel <cristian.eigel@esrlabs.com>"]
+name = "feather-dcf77"
+edition = "2018"
+version = "0.1.0"
+
+[dependencies]
+cortex-m = "0.7.1"
+cortex-m-rtic = "0.5.8"
+panic-rtt-target = {version="0.1.2", features = ["cortex-m"] }
+rtt-target = {version= "0.3.1",  features = ["cortex-m"] }
+
+[dependencies.feather-f405]
+version = "0.2.0"
+git = "https://github.com/jkristell/feather-f405.git"
+
+[dev-dependencies]
+rtt-target = { version = "0.3", features = ["cortex-m"] }
+panic-rtt-target = { version = "0.1", features = ["cortex-m"] }
+
+[profile.dev]
+debug=true
+opt-level=0
+
+[profile.dev.package."*"]
+opt-level=0
+debug = true # symbols are nice and they don't increase the size on Flash
