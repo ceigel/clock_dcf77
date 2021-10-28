@@ -10,6 +10,7 @@ cortex-m = "0.7.1"
 cortex-m-rtic = "0.5.8"
 panic-rtt-target = {version="0.1.2", features = ["cortex-m"] }
 rtt-target = {version= "0.3.1",  features = ["cortex-m"] }
+chrono = {version = "0.4.19", default-features=false}
 
 [dependencies.feather-f405]
 version = "0.2.0"
