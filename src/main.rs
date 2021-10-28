@@ -2,21 +2,39 @@
 #![no_main]
 mod datetime_converter;
 mod dcf77_decoder;
+mod time_display;
 
 use panic_rtt_target as _;
 
+use chrono::naive::NaiveDateTime;
 use cortex_m::peripheral::DWT;
 use datetime_converter::DCF77DateTimeConverter;
 use dcf77_decoder::DCF77Decoder;
 use feather_f405::hal as stm32f4xx_hal;
 use feather_f405::{hal::prelude::*, pac, setup_clocks};
+use ht16k33::{Dimming, Display, HT16K33};
+use rtcc::Rtcc;
 use rtic::app;
 use rtt_target::{rprintln, rtt_init_print};
-use stm32f4xx_hal::gpio::{gpioa, gpioc, Alternate, Output, PushPull, AF2};
+use stm32f4xx_hal::{
+    gpio::{gpioa, gpiob, gpioc, Alternate, AlternateOD, Output, PushPull, AF2, AF4},
+    i2c::I2c,
+    rtc::Rtc,
+};
+use time_display::{display_error, show_rtc_time};
 
 pub(crate) const TICKS_PER_SECOND: u32 = 10_000;
 pub(crate) const MINUTE_MARKER_TIME: u32 = 15_000;
 pub(crate) const TRUE_BIT_TIME: u32 = 1500;
+
+type SegmentDisplay =
+    HT16K33<I2c<pac::I2C1, (gpiob::PB6<AlternateOD<AF4>>, gpiob::PB7<AlternateOD<AF4>>)>>;
+
+fn sync_rtc(rtc: &mut Rtc, dt: &NaiveDateTime) {
+    rtc.set_datetime(dt).expect("To be able to set datetime");
+}
+
+const DISP_I2C_ADDR: u8 = 0x77;
 
 #[app(device = feather_f405::hal::stm32, monotonic = rtic::cyccnt::CYCCNT, peripherals = true)]
 const APP: () = {
@@ -25,7 +43,10 @@ const APP: () = {
         debug_pin: gpioc::PC6<Output<PushPull>>,
         timer: pac::TIM3,
         dcf77: DCF77Decoder,
+        rtc: Rtc,
+        segment_display: SegmentDisplay,
     }
+
     #[init(spawn=[])]
     fn init(cx: init::Context) -> init::LateResources {
         rtt_init_print!();
@@ -84,12 +105,33 @@ const APP: () = {
             w.cen().set_bit();
             w
         });
+        let gpiob = device.GPIOB.split();
+        let scl = gpiob.pb6.into_alternate_open_drain::<AF4>();
+        let sda = gpiob.pb7.into_alternate_open_drain::<AF4>();
+        let i2c = I2c::new(device.I2C1, (scl, sda), 400.khz(), clocks);
+        let mut ht16k33 = HT16K33::new(i2c, DISP_I2C_ADDR);
+        ht16k33.initialize().expect("Failed to initialize ht16k33");
+        ht16k33
+            .set_display(Display::ON)
+            .expect("Could not turn on the display!");
+        ht16k33
+            .set_dimming(Dimming::BRIGHTNESS_MAX)
+            .expect("Could not set dimming!");
+        display_error(&mut ht16k33, 0);
+        ht16k33
+            .write_display_buffer()
+            .expect("Could not write 7-segment display");
+        let mut pwr = device.PWR;
+        let rtc = Rtc::new(device.RTC, 255, 127, false, &mut pwr);
+
         rprintln!("Init successful");
         init::LateResources {
             dcf_pin: pin,
             debug_pin: output_pin,
             timer,
             dcf77: DCF77Decoder::new(),
+            rtc,
+            segment_display: ht16k33,
         }
     }
 
@@ -100,7 +142,7 @@ const APP: () = {
         loop {}
     }
 
-    #[task(binds = TIM3, priority=2, resources=[timer, dcf_pin, debug_pin, dcf77])]
+    #[task(binds = TIM3, priority=2, resources=[timer, dcf_pin, debug_pin, dcf77, segment_display, rtc])]
     fn tim3(cx: tim3::Context) {
         let timer: &mut pac::TIM3 = cx.resources.timer;
         let _sr = timer.sr.read();
@@ -118,11 +160,14 @@ const APP: () = {
                             rprintln!("Decoding error: {:?}", err);
                         }
                         Ok(dt) => {
+                            sync_rtc(cx.resources.rtc, &dt);
                             rprintln!("Good date: {:?}", dt);
                         }
                     }
                 }
             }
+            let display = cx.resources.segment_display;
+            show_rtc_time(cx.resources.rtc, display);
         }
         timer.sr.modify(|_, w| {
             w.tif().clear_bit();
