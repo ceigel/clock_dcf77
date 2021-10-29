@@ -65,11 +65,13 @@ const APP: () = {
             w
         });
         timer.smcr.write(|w| {
+            w.etp().inverted();
             w.sms().reset_mode();
             w.ts().ti1fp1();
             w
         });
-        timer.dier.write(|w| w.cc1ie().set_bit());
+
+        timer.dier.write(|w| w.cc1ie().set_bit().cc2ie().set_bit());
         timer.cr1.modify(|_, w| {
             w.cen().set_bit();
             w
@@ -92,15 +94,25 @@ const APP: () = {
     #[task(binds = TIM3, priority=2, resources=[timer, dcf_pin, debug_pin])]
     fn tim3(cx: tim3::Context) {
         let timer: &mut pac::TIM3 = cx.resources.timer;
-        let capture = timer.ccr1.read().bits();
-        let flags = timer.sr.read().bits();
-        timer.egr.write(|w| w.ug().set_bit());
+        let flags = timer.sr.read();
+        let fbits: u32 = flags.bits();
+        if flags.cc1if().is_match_() {
+            let c1 = timer.ccr1.read().bits();
+            rprintln!("c1 {}", c1);
+        }
+        if flags.cc2if().is_match_() {
+            let c2 = timer.ccr2.read().bits();
+            rprintln!("c2 {}", c2);
+        }
+        if !flags.cc1if().is_match_() && !flags.cc2if().is_match_() {
+            rprintln!("NONE");
+        }
+        let cnt = timer.cnt.read().bits();
+        rprintln!("cnt: {}, flags: {:016b}", cnt, fbits);
         timer.sr.modify(|_, w| {
             w.uif().clear_bit();
             w.tif().clear_bit();
             w
         });
-        let msg = if capture > 15000 { " minute mark" } else { "" };
-        rprintln!("tick {}, flags: {:b}{}", capture, flags, msg);
     }
 };
