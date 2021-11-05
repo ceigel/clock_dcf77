@@ -15,10 +15,6 @@ rtt-target = {version= "0.3.1",  features = ["cortex-m"] }
 version = "0.2.0"
 git = "https://github.com/jkristell/feather-f405.git"
 
-[dev-dependencies]
-rtt-target = { version = "0.3", features = ["cortex-m"] }
-panic-rtt-target = { version = "0.1", features = ["cortex-m"] }
-
 [profile.dev]
 debug=true
 opt-level=0

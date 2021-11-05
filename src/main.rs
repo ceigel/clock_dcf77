@@ -124,6 +124,7 @@ const APP: () = {
         let flags = timer.sr.read();
         let count: &mut u8 = cx.resources.count;
         if flags.cc1if().is_match_() {
+            rprintln!("{}", *count);
             let c1 = timer.ccr1.read().bits();
             add_tick(cx.resources.triggers, 10, (c1 / 10) as usize);
             *count += 1;
