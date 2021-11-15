@@ -21,9 +21,39 @@ impl DCF77Decoder {
     pub fn reset_last_bits(&mut self) {
         self.last_bits.take();
     }
+
     pub fn last_bits(&self) -> Option<u64> {
         self.last_bits
     }
+
+    pub fn add_minute(&mut self) {
+        self.last_bits.replace(self.current_bits);
+        rprintln!(
+            "Minute mark: {:059b}, bits: {}",
+            self.current_bits,
+            self.bit_pos
+        );
+        self.current_bits = 0;
+        self.bit_pos = 0;
+        self.start_detected = true;
+    }
+
+    pub fn add_second(&mut self, bit: bool) {
+        if bit {
+            self.current_bits |= 1 << self.bit_pos;
+        } else {
+            self.current_bits &= !(1 << self.bit_pos);
+        }
+        if self.bit_pos == 59 {
+            rprintln!("Overrun!");
+        }
+        if !self.start_detected {
+            rprintln!("Data: {:059b}, bits: {}", self.current_bits, self.bit_pos);
+        }
+        self.bit_pos += 1;
+    }
+
+    /*
     pub fn read_bit(&mut self, c1: u32, c2: u32) -> bool {
         if c2 > TRUE_BIT_TIME {
             self.current_bits |= 1 << self.bit_pos;
@@ -48,5 +78,5 @@ impl DCF77Decoder {
         } else {
             false
         }
-    }
+    } */
 }
