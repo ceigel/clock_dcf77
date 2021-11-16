@@ -22,13 +22,10 @@ use stm32f4xx_hal::{
     i2c::I2c,
     rtc::Rtc,
 };
-use time_display::{display_error, show_rtc_time};
+use time_display::{blink_second, display_error, show_rtc_time};
 
 const DISP_I2C_ADDR: u8 = 0x77;
-
-pub(crate) const TICKS_PER_SECOND: u32 = 10_000;
-pub(crate) const MINUTE_MARKER_TIME: u32 = 15_000;
-pub(crate) const TRUE_BIT_TIME: u32 = 1500;
+const THRESHOLD: usize = 20;
 
 type SegmentDisplay =
     HT16K33<I2c<pac::I2C1, (gpiob::PB6<AlternateOD<AF4>>, gpiob::PB7<AlternateOD<AF4>>)>>;
@@ -137,6 +134,20 @@ impl TickBuffer {
         }
     }
 
+    pub fn up_edge_in_phase(&self, val: u32) -> bool {
+        if let Some(phase) = self.phase {
+            let diff = core::cmp::min(
+                self.wrap(self.counts.len() + (val as usize) - phase),
+                self.wrap(self.counts.len() + phase - (val as usize)),
+            );
+            if diff < THRESHOLD {
+                return true;
+            }
+            rprintln!("Second diff; {}", diff);
+        }
+        false
+    }
+
     fn add_level(&mut self, from: usize, to: usize, add: i8) {
         if from < to {
             increment_vals(&mut self.counts[from..to], add);
@@ -188,20 +199,20 @@ impl TickBuffer {
 
 fn wrap_val(val: usize, max: usize) -> usize {
     let mut val = val;
-    while (val > max) {
+    while val >= max {
         val -= max;
     }
     val
 }
 
 const TIMER_RANGE: u32 = 8_000_u32;
-const TIMER_MAX: u32 = TIMER_RANGE << 2;
+const TIMER_MAX: u32 = 32_000_u32;
 
 fn init_timer(timer: pac::TIM3, clocks: &stm32f4xx_hal::rcc::Clocks) -> pac::TIM3 {
-    let psc = (((2 * clocks.pclk1().0) / (TIMER_RANGE - 1)) - 1) as u16;
+    let psc = (((2 * clocks.pclk1().0) / TIMER_RANGE) - 1) as u16;
 
     timer.psc.write(|w| w.psc().bits(psc));
-    timer.arr.write(|w| w.arr().bits(TIMER_MAX as u16));
+    timer.arr.write(|w| w.arr().bits((TIMER_MAX - 1) as u16));
 
     timer.cr1.modify(|_, w| w.urs().set_bit());
     timer.egr.write(|w| w.ug().set_bit());
@@ -338,31 +349,38 @@ const APP: () = {
         let decoder = cx.resources.dcf77;
         let flags = timer.sr.read();
         let fbits = flags.bits();
+        let binner = cx.resources.ticks;
+        let count: &mut u8 = cx.resources.count;
         let c1 = if flags.cc1if().is_match_() {
             let c1 = timer.ccr1.read().bits() >> 3;
-            let count: &mut u8 = cx.resources.count;
-            rprintln!("{} - {} : {:016b}", c1, *count, fbits);
-            cx.resources.ticks.add_tick(c1 >> 2, Edge::Down);
+            //rprintln!("{} - {} : {:016b}", c1 % 1000, *count, fbits);
+            binner.add_tick(c1 % 1000, Edge::Down);
             *count += 1;
-            if *count == 120 {
+            if *count == 60 {
                 *count = 0;
-                cx.resources.ticks.compute_phase();
-                writeln!(cx.resources.output2, "{}", cx.resources.ticks).unwrap();
+                binner.compute_phase();
+                writeln!(cx.resources.output2, "{}", binner).unwrap();
             }
-            Some(c1)
+            if binner.up_edge_in_phase(c1 % 1_000) {
+                Some(c1)
+            } else {
+                None
+            }
         } else {
             None
         };
-        let mut c2 = if flags.cc2if().is_match_() {
+        let c2 = if flags.cc2if().is_match_() {
             let c2 = timer.ccr2.read().bits() >> 3;
-            cx.resources.ticks.add_tick(c2 >> 2, Edge::Up);
-            Some(c2 >> 3)
+            binner.add_tick(c2 % 1000, Edge::Up);
+            Some(c2)
         } else {
             None
         };
+        let display = cx.resources.segment_display;
         match (c1, *cx.resources.last_second_marker) {
             (Some(c1), Some(last_second)) => {
-                if wrap_val((4_000 + c1 - last_second) as usize, 4_000) > 1800 {
+                let range: u32 = TIMER_MAX >> 3;
+                if wrap_val((range + c1 - last_second) as usize, range as usize) > 1800 {
                     decoder.add_minute();
                 }
                 cx.resources.last_second_marker.replace(c1);
@@ -374,10 +392,13 @@ const APP: () = {
         }
         match (c2, *cx.resources.last_second_marker) {
             (Some(c2), Some(last_second)) => {
-                let diff = wrap_val((4_000 + c2 - last_second) as usize, 4_000);
-                if (90..110).contains(&diff) {
+                let range: u32 = TIMER_MAX >> 3;
+                let diff = wrap_val((range + c2 - last_second) as usize, range as usize);
+                //rprintln!("diff: {}, c2: {}, last_second: {}", diff, c2, last_second);
+                blink_second((*count & 1) == 1, display);
+                if (80..120).contains(&diff) {
                     decoder.add_second(false);
-                } else if (190..210).contains(&diff) {
+                } else if (180..220).contains(&diff) {
                     decoder.add_second(true);
                 }
             }
@@ -397,7 +418,6 @@ const APP: () = {
                 }
             }
         }
-        let display = cx.resources.segment_display;
         show_rtc_time(cx.resources.rtc, display);
         timer.sr.modify(|_, w| {
             w.tif().clear_bit();

@@ -11,7 +11,7 @@ set backtrace limit 32
 # break HardFault
 break rust_begin_unwind
 
-break main
+break main.rs:282
 # *try* to stop at the user entry point (it might be gone due to inlining)
 
 # # send captured ITM to the file itm.fifo

@@ -1,4 +1,3 @@
-use crate::{MINUTE_MARKER_TIME, TRUE_BIT_TIME};
 use rtt_target::rprintln;
 
 pub struct DCF77Decoder {
@@ -39,6 +38,7 @@ impl DCF77Decoder {
     }
 
     pub fn add_second(&mut self, bit: bool) {
+        rprintln!("Second add: {}", bit);
         if bit {
             self.current_bits |= 1 << self.bit_pos;
         } else {

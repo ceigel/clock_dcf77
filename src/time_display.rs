@@ -88,3 +88,7 @@ pub(crate) fn show_rtc_time(rtc: &mut Rtc, display: &mut SegmentDisplay) {
     };
     display_time(display, hours, m, s, 0);
 }
+
+pub(crate) fn blink_second(on_state: bool, display: &mut SegmentDisplay) {
+    display.update_buffer_with_colon(on_state);
+}
