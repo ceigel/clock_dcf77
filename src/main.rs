@@ -7,14 +7,13 @@ mod time_display;
 use panic_rtt_target as _;
 
 use chrono::naive::NaiveDateTime;
-use core::fmt::Write;
 use cortex_m::peripheral::DWT;
 use datetime_converter::DCF77DateTimeConverter;
 use dcf77_decoder::DCF77Decoder;
 use feather_f405::hal as stm32f4xx_hal;
 use feather_f405::{hal::prelude::*, pac, setup_clocks};
 use ht16k33::{Dimming, Display, HT16K33};
-use rtcc::Rtcc;
+use rtcc::{Hours, Rtcc};
 use rtic::app;
 use rtt_target::{rprintln, rtt_init, set_print_channel, UpChannel};
 use stm32f4xx_hal::{
@@ -22,7 +21,7 @@ use stm32f4xx_hal::{
     i2c::I2c,
     rtc::Rtc,
 };
-use time_display::{blink_second, display_error, show_rtc_time};
+use time_display::{blink_second, display_error, display_time};
 
 const DISP_I2C_ADDR: u8 = 0x77;
 const THRESHOLD: usize = 20;
@@ -35,6 +34,8 @@ fn sync_rtc(rtc: &mut Rtc, dt: &NaiveDateTime) {
 }
 
 pub const CUTOFF_THRESHOLD: u8 = 198;
+pub const PHASE_MAX: u8 = 60;
+
 pub struct TickBuffer {
     pub phase: Option<usize>,
     pub counts: [u8; 1000],
@@ -42,6 +43,7 @@ pub struct TickBuffer {
     max_val: u8,
     down_edge: Option<u32>,
     up_edge: Option<u32>,
+    tick_count: u8,
 }
 
 impl Default for TickBuffer {
@@ -53,6 +55,7 @@ impl Default for TickBuffer {
             max_val: 0,
             down_edge: None,
             up_edge: None,
+            tick_count: 0,
         }
     }
 }
@@ -88,31 +91,6 @@ pub enum Edge {
 }
 
 impl TickBuffer {
-    /*pub fn add_tick(&mut self, idx: usize, direction: Edge) {
-        let span = 10;
-        let add = match direction {
-            Edge::Down => 1, Edge::Up => -1
-        }
-        let from = if idx < span { 0 } else { idx - span };
-        let to = if idx + span >= self.counts.len() {
-            self.counts.len()
-        } else {
-            idx + span + 1
-        };
-        increment_vals(&mut self.counts[from..to], add);
-        if idx < span {
-            let from = self.counts.len() - span + idx;
-            increment_vals(&mut self.counts[from..], add);
-        } else if self.counts.len() <= idx + span {
-            let to = idx + span - self.counts.len();
-            increment_vals(&mut self.counts[0..to], add);
-        }
-        self.max_val = *self.counts.iter().max().unwrap();
-        if self.max_val > CUTOFF_THRESHOLD {
-            self.reduce_values();
-        }
-    } */
-
     pub fn add_tick(&mut self, reg: u32, direction: Edge) {
         match direction {
             Edge::Down => {
@@ -129,23 +107,51 @@ impl TickBuffer {
             }
         };
         self.max_val = core::cmp::max(self.max_val, self.counts[reg as usize]);
+        self.tick_count = self.tick_count.saturating_add(1);
+        if self.tick_count == PHASE_MAX {
+            self.compute_phase();
+            self.tick_count = 0;
+        }
         if self.max_val > CUTOFF_THRESHOLD {
             self.reduce_values();
         }
     }
 
-    pub fn up_edge_in_phase(&self, val: u32) -> bool {
+    pub fn down_edge_in_phase(&self, val: u32) -> bool {
         if let Some(phase) = self.phase {
             let diff = core::cmp::min(
                 self.wrap(self.counts.len() + (val as usize) - phase),
                 self.wrap(self.counts.len() + phase - (val as usize)),
             );
-            if diff < THRESHOLD {
+            if diff <= THRESHOLD {
                 return true;
             }
-            rprintln!("Second diff; {}", diff);
+            rprintln!("Down edge not in phase. diff; {}", diff);
         }
         false
+    }
+
+    pub fn compute_bit(&self, val: u32) -> Option<bool> {
+        if let Some(phase) = self.phase {
+            let zero_phase = self.wrap(self.counts.len() + phase + 100);
+            let one_phase = self.wrap(self.counts.len() + phase + 200);
+            let d0 = core::cmp::min(
+                self.wrap(self.counts.len() + (val as usize) - zero_phase),
+                self.wrap(self.counts.len() + zero_phase - (val as usize)),
+            );
+            let d1 = core::cmp::min(
+                self.wrap(self.counts.len() + (val as usize) - one_phase),
+                self.wrap(self.counts.len() + one_phase - (val as usize)),
+            );
+            if d0 <= THRESHOLD {
+                return Some(false);
+            }
+            if d1 <= THRESHOLD {
+                return Some(true);
+            }
+            rprintln!("Bit not in phase. diff; {}: {}", d0, d1);
+        }
+        None
     }
 
     fn add_level(&mut self, from: usize, to: usize, add: i8) {
@@ -165,6 +171,7 @@ impl TickBuffer {
     }
 
     fn compute_phase(&mut self) {
+        rprintln!("Compute phase");
         const WINDOW_SIZE: usize = 50;
         const STEPS: usize = 2;
         let mut integral: u32 = 0;
@@ -205,6 +212,14 @@ fn wrap_val(val: usize, max: usize) -> usize {
     val
 }
 
+fn minute_detected(current_edge: u32, last_edge: Option<u32>) -> bool {
+    last_edge
+        .map(|last_edge| {
+            let range: u32 = TIMER_MAX >> 3;
+            wrap_val((range + current_edge - last_edge) as usize, range as usize) > 1800
+        })
+        .unwrap_or(false)
+}
 const TIMER_RANGE: u32 = 8_000_u32;
 const TIMER_MAX: u32 = 32_000_u32;
 
@@ -221,7 +236,7 @@ fn init_timer(timer: pac::TIM3, clocks: &stm32f4xx_hal::rcc::Clocks) -> pac::TIM
     timer.ccmr1_input().write(|w| {
         w.cc1s().ti1();
         w.cc2s().ti1();
-        //w.ic1f().fck_int_n8();
+        //        w.ic1f().fck_int_n8();
         w
     });
 
@@ -232,14 +247,10 @@ fn init_timer(timer: pac::TIM3, clocks: &stm32f4xx_hal::rcc::Clocks) -> pac::TIM
         w.cc2np().clear_bit(); // active raising edge
         w.cc1e().set_bit(); // enable captures
         w.cc2e().set_bit();
+        w.cc3e().clear_bit();
+        w.cc4e().clear_bit();
         w
     });
-    /*timer.smcr.write(|w| {
-        w.etp().inverted();
-        w.sms().reset_mode();
-        w.ts().ti1fp1();
-        w
-    });*/
 
     timer.dier.write(|w| w.cc1ie().set_bit().cc2ie().set_bit());
     timer.cr1.modify(|_, w| {
@@ -262,9 +273,11 @@ const APP: () = {
         ticks: TickBuffer,
         #[init(None)]
         last_second_marker: Option<u32>,
-        #[init(0)]
-        count: u8,
+        #[init(false)]
+        tick: bool,
         output2: UpChannel,
+        #[init(None)]
+        last_sync: Option<NaiveDateTime>,
     }
 
     #[init(spawn=[])]
@@ -343,66 +356,71 @@ const APP: () = {
         loop {}
     }
 
-    #[task(binds = TIM3, priority=2, resources=[timer, dcf_pin, debug_pin, dcf77, ticks, count, segment_display, rtc, output2, last_second_marker])]
+    #[task(resources = [segment_display, tick])]
+    fn show_tick(cx: show_tick::Context) {
+        let tick = cx.resources.tick;
+        *tick = !*tick;
+        blink_second(*tick, cx.resources.segment_display);
+    }
+
+    #[task(resources = [segment_display, last_sync, rtc])]
+    fn show_time(mut cx: show_time::Context) {
+        rprintln!("Show time");
+        let (h, m) = cx.resources.rtc.lock(|rtc| {
+            let h = rtc.get_hours().expect("to read hours");
+            let m = rtc.get_minutes().expect("to read minutes");
+            (h, m)
+        });
+
+        let hours = match h {
+            Hours::AM(hours) => hours,
+            Hours::PM(hours) => hours,
+            Hours::H24(hours) => hours,
+        };
+
+        let display = cx.resources.segment_display;
+        display_time(display, hours, m, 0);
+    }
+
+    #[task(binds = TIM3, priority=2, resources=[timer, dcf_pin, debug_pin, dcf77, ticks,  rtc, output2, last_second_marker, last_sync], spawn=[show_tick, show_time])]
     fn tim3(cx: tim3::Context) {
         let timer: &mut pac::TIM3 = cx.resources.timer;
         let decoder = cx.resources.dcf77;
         let flags = timer.sr.read();
         let fbits = flags.bits();
         let binner = cx.resources.ticks;
-        let count: &mut u8 = cx.resources.count;
-        let c1 = if flags.cc1if().is_match_() {
-            let c1 = timer.ccr1.read().bits() >> 3;
-            //rprintln!("{} - {} : {:016b}", c1 % 1000, *count, fbits);
-            binner.add_tick(c1 % 1000, Edge::Down);
-            *count += 1;
-            if *count == 60 {
-                *count = 0;
-                binner.compute_phase();
-                writeln!(cx.resources.output2, "{}", binner).unwrap();
+        let debug_pin = cx.resources.debug_pin;
+        let c1 = flags
+            .cc1if()
+            .is_match_()
+            .then(|| {
+                let c1 = timer.ccr1.read().bits() >> 3;
+                rprintln!("{} : {:016b}", c1 % 1000, fbits);
+                binner.add_tick(c1 % 1000, Edge::Down);
+                c1
+            })
+            .and_then(|c1| binner.down_edge_in_phase(c1 % 1_000).then(|| c1));
+        let bit = flags
+            .cc2if()
+            .is_match_()
+            .then(|| {
+                let c2 = timer.ccr2.read().bits() >> 3;
+                binner.add_tick(c2 % 1000, Edge::Up);
+                c2
+            })
+            .and_then(|c2| binner.compute_bit(c2 % 1000));
+        if let Some(c1) = c1 {
+            debug_pin.set_low();
+            let last_second_marker = cx.resources.last_second_marker;
+            if minute_detected(c1, *last_second_marker) {
+                decoder.add_minute()
             }
-            if binner.up_edge_in_phase(c1 % 1_000) {
-                Some(c1)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let c2 = if flags.cc2if().is_match_() {
-            let c2 = timer.ccr2.read().bits() >> 3;
-            binner.add_tick(c2 % 1000, Edge::Up);
-            Some(c2)
-        } else {
-            None
-        };
-        let display = cx.resources.segment_display;
-        match (c1, *cx.resources.last_second_marker) {
-            (Some(c1), Some(last_second)) => {
-                let range: u32 = TIMER_MAX >> 3;
-                if wrap_val((range + c1 - last_second) as usize, range as usize) > 1800 {
-                    decoder.add_minute();
-                }
-                cx.resources.last_second_marker.replace(c1);
-            }
-            (Some(c1), None) => {
-                cx.resources.last_second_marker.replace(c1);
-            }
-            _ => {}
+            cx.spawn.show_tick().ok();
+            last_second_marker.replace(c1);
         }
-        match (c2, *cx.resources.last_second_marker) {
-            (Some(c2), Some(last_second)) => {
-                let range: u32 = TIMER_MAX >> 3;
-                let diff = wrap_val((range + c2 - last_second) as usize, range as usize);
-                //rprintln!("diff: {}, c2: {}, last_second: {}", diff, c2, last_second);
-                blink_second((*count & 1) == 1, display);
-                if (80..120).contains(&diff) {
-                    decoder.add_second(false);
-                } else if (180..220).contains(&diff) {
-                    decoder.add_second(true);
-                }
-            }
-            _ => {}
+        if let Some(bit) = bit {
+            debug_pin.set_high();
+            decoder.add_second(bit);
         }
 
         if let Some(datetime_bits) = decoder.last_bits() {
@@ -414,14 +432,19 @@ const APP: () = {
                 }
                 Ok(dt) => {
                     sync_rtc(cx.resources.rtc, &dt);
+                    cx.resources.last_sync.replace(dt);
+                    cx.spawn.show_time().ok();
                     rprintln!("Good date: {:?}", dt);
                 }
             }
         }
-        show_rtc_time(cx.resources.rtc, display);
         timer.sr.modify(|_, w| {
             w.tif().clear_bit();
+            w.uif().clear_bit();
             w
         });
+    }
+    extern "C" {
+        fn DCMI();
     }
 };

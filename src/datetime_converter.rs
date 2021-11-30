@@ -3,8 +3,7 @@ use core::fmt::Debug;
 use rtt_target::rprintln;
 #[derive(Debug)]
 pub enum DateTimeErr {
-    MinutesWrong,
-    HoursWrong,
+    TimeWrong,
     DateWrong,
     WrongStart,
 }
@@ -62,35 +61,30 @@ impl DCF77DateTimeConverter {
         let day = DCF77DateTimeConverter::naive_day_or_hours(self, day);
         rprintln!("Naive date: {}-{}-{}", day, month, year);
 
-        if !check_datetime_parity || month >= 12 || day > 31 || year >= 2099 {
+        if !check_datetime_parity {
             return Err(DateTimeErr::DateWrong);
         }
 
         let hours = DCF77DateTimeConverter::naive_day_or_hours(self, hours);
         let minutes = DCF77DateTimeConverter::naive_minutes(self, minutes);
         rprintln!("Naive time: {}:{}", hours, minutes);
-        if !check_hours_parity || hours >= 24 {
-            return Err(DateTimeErr::HoursWrong);
+        if !check_hours_parity {
+            return Err(DateTimeErr::TimeWrong);
         }
-        if !check_minutes_parity || minutes >= 60 {
-            return Err(DateTimeErr::MinutesWrong);
+        if !check_minutes_parity {
+            return Err(DateTimeErr::TimeWrong);
         }
 
-        //let dt: NaiveDateTime = NaiveDate::from_ymd(2016, 7, 8).and_hms(9, 10, 11);
-        //println!("{:?}", dt);
-
-        //let dt: NaiveDateTime = NaiveDate::
-        //                        from_ymd(DCF77DateTimeConverter::naive_year(self, year) as i32,
-        //                            DCF77DateTimeConverter::naive_month(self, month),
-        //                            DCF77DateTimeConverter::naive_day_or_hours(self, day)
-        //                        )
-        //                        .and_hms(DCF77DateTimeConverter::naive_day_or_hours(self, hours),
-        //                            DCF77DateTimeConverter::naive_minutes(self, minutes),
-        //                            0
-        //                        );
-        //let dt: NaiveDateTime = NaiveDate::from_ymd(2020, 8, 14).and_hms(22, 32, 0);
-        let date_time = NaiveDate::from_ymd(year, month, day).and_hms(hours, minutes, 0);
-        Ok(date_time)
+        let date_time = NaiveDate::from_ymd_opt(year, month, day);
+        if let Some(ymd) = date_time {
+            if let Some(date_time) = ymd.and_hms_opt(hours, minutes, 0) {
+                Ok(date_time)
+            } else {
+                Err(DateTimeErr::TimeWrong)
+            }
+        } else {
+            Err(DateTimeErr::DateWrong)
+        }
     }
 
     fn naive_year(&self, year_dcf77: u32) -> u32 {
