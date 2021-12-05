@@ -27,11 +27,7 @@ impl DCF77Decoder {
 
     pub fn add_minute(&mut self) {
         self.last_bits.replace(self.current_bits);
-        rprintln!(
-            "Minute mark: {:059b}, bits: {}",
-            self.current_bits,
-            self.bit_pos
-        );
+        rprintln!("Minute mark: {:059b}, bits: {}", self.current_bits, self.bit_pos);
         self.current_bits = 0;
         self.bit_pos = 0;
         self.start_detected = true;
@@ -51,5 +47,11 @@ impl DCF77Decoder {
             rprintln!("Overrun!");
         }
         self.bit_pos += 1;
+    }
+}
+
+impl Default for DCF77Decoder {
+    fn default() -> Self {
+        Self::new()
     }
 }

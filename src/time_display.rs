@@ -10,13 +10,11 @@ pub(crate) fn display_time(display: &mut SegmentDisplay, hours: u8, minutes: u8,
     display.update_buffer_with_digit(Index::Two, d2);
     display.update_buffer_with_digit(Index::Three, d3);
     display.update_buffer_with_digit(Index::Four, d4);
-    display.update_buffer_with_dot(Index::One, dots & 1 == 1);
-    display.update_buffer_with_dot(Index::Two, dots & 2 == 1);
-    display.update_buffer_with_dot(Index::Three, dots & 4 == 1);
-    display.update_buffer_with_dot(Index::Four, dots & 8 == 1);
-    display
-        .write_display_buffer()
-        .expect("Could not write 7-segment display");
+    display.update_buffer_with_dot(Index::One, dots & 1 != 0);
+    display.update_buffer_with_dot(Index::Two, dots & 2 != 0);
+    display.update_buffer_with_dot(Index::Three, dots & 4 != 0);
+    display.update_buffer_with_dot(Index::Four, dots & 8 != 0);
+    display.write_display_buffer().expect("Could not write 7-segment display");
 }
 
 fn display_date(display: &mut SegmentDisplay, months: u8, days: u8) {
@@ -30,9 +28,7 @@ fn display_date(display: &mut SegmentDisplay, months: u8, days: u8) {
     display.update_buffer_with_digit(Index::Four, d4);
     display.update_buffer_with_colon(false);
     display.update_buffer_with_dot(Index::Two, true);
-    display
-        .write_display_buffer()
-        .expect("Could not write 7-segment display");
+    display.write_display_buffer().expect("Could not write 7-segment display");
 }
 
 fn display_year(display: &mut SegmentDisplay, year: u16) {
@@ -49,34 +45,22 @@ fn display_year(display: &mut SegmentDisplay, year: u16) {
     display.update_buffer_with_digit(Index::Four, d4);
     display.update_buffer_with_colon(false);
     display.update_buffer_with_dot(Index::Two, false);
-    display
-        .write_display_buffer()
-        .expect("Could not write 7-segment display");
+    display.write_display_buffer().expect("Could not write 7-segment display");
 }
 
 pub(crate) fn display_error(display: &mut SegmentDisplay, dots: u8) {
-    display
-        .update_buffer_with_char(Index::One, AsciiChar::Minus)
-        .expect("display minus");
-    display
-        .update_buffer_with_char(Index::Two, AsciiChar::Minus)
-        .expect("display minus");
-    display
-        .update_buffer_with_char(Index::Three, AsciiChar::Minus)
-        .expect("display minus");
-    display
-        .update_buffer_with_char(Index::Four, AsciiChar::Minus)
-        .expect("display minus");
-    display.update_buffer_with_dot(Index::One, dots & 1 == 1);
-    display.update_buffer_with_dot(Index::Two, dots & 2 == 1);
-    display.update_buffer_with_dot(Index::Three, dots & 4 == 1);
-    display.update_buffer_with_dot(Index::Four, dots & 8 == 1);
+    display.update_buffer_with_char(Index::One, AsciiChar::Minus).expect("display minus");
+    display.update_buffer_with_char(Index::Two, AsciiChar::Minus).expect("display minus");
+    display.update_buffer_with_char(Index::Three, AsciiChar::Minus).expect("display minus");
+    display.update_buffer_with_char(Index::Four, AsciiChar::Minus).expect("display minus");
+    display.update_buffer_with_dot(Index::One, dots & 1 != 0);
+    display.update_buffer_with_dot(Index::Two, dots & 2 != 0);
+    display.update_buffer_with_dot(Index::Three, dots & 4 != 0);
+    display.update_buffer_with_dot(Index::Four, dots & 8 != 0);
     display.update_buffer_with_colon(false);
 }
 
 pub(crate) fn blink_second(on_state: bool, display: &mut SegmentDisplay) {
     display.update_buffer_with_colon(on_state);
-    display
-        .write_display_buffer()
-        .expect("Could not write 7-segment display");
+    display.write_display_buffer().expect("Could not write 7-segment display");
 }

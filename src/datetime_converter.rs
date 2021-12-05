@@ -13,10 +13,6 @@ pub enum DateTimeErr {
 /// * 23:14 15.Sep.2021 Deutschland (CEST)
 /// * `let test_data = 0b00000000000000001000_1_0010100_0_110001_1_101010_110_10010_10000100_1_0;`
 /// * Zero-padded 64bit intgeger: `000000000000000010001001010001100011101010110100101000010010`
-/// ```
-/// // 23:14 15.Sep.2021 Deutschland (CEST)
-/// // Write me!
-/// ```
 pub struct DCF77DateTimeConverter {
     encoded_data: u64,
     bcd: [u32; 8],
@@ -49,12 +45,9 @@ impl DCF77DateTimeConverter {
         let hours = ((self.encoded_data >> 29) & SIX_BITS) as u32;
         let minutes = ((self.encoded_data >> 21) & SEVEN_BITS) as u32;
 
-        let check_datetime_parity: bool = DCF77DateTimeConverter::check_parity(datetime_frame)
-            == ((self.encoded_data >> 58) & 1) as u32;
-        let check_hours_parity: bool =
-            DCF77DateTimeConverter::check_parity(hours) == ((self.encoded_data >> 35) & 1) as u32;
-        let check_minutes_parity: bool =
-            DCF77DateTimeConverter::check_parity(minutes) == ((self.encoded_data >> 28) & 1) as u32;
+        let check_datetime_parity: bool = DCF77DateTimeConverter::check_parity(datetime_frame) == ((self.encoded_data >> 58) & 1) as u32;
+        let check_hours_parity: bool = DCF77DateTimeConverter::check_parity(hours) == ((self.encoded_data >> 35) & 1) as u32;
+        let check_minutes_parity: bool = DCF77DateTimeConverter::check_parity(minutes) == ((self.encoded_data >> 28) & 1) as u32;
 
         let year = DCF77DateTimeConverter::naive_year(self, year) as i32;
         let month = DCF77DateTimeConverter::naive_month(self, month);
@@ -124,6 +117,6 @@ impl DCF77DateTimeConverter {
     /// ```
     fn check_parity(i: u32) -> u32 {
         let count = i.count_ones();
-        return count % 2;
+        count & 1
     }
 }
