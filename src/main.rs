@@ -24,10 +24,10 @@ use stm32f4xx_hal::{
 use time_display::{blink_second, display_error, display_time};
 
 const DISP_I2C_ADDR: u8 = 0x77;
-const THRESHOLD: usize = 20;
+const AFTER_PHASE_THRESHOLD: usize = 30;
+const BEFORE_PHASE_THRESHOLD: usize = 10;
 
-type SegmentDisplay =
-    HT16K33<I2c<pac::I2C1, (gpiob::PB6<AlternateOD<AF4>>, gpiob::PB7<AlternateOD<AF4>>)>>;
+type SegmentDisplay = HT16K33<I2c<pac::I2C1, (gpiob::PB6<AlternateOD<AF4>>, gpiob::PB7<AlternateOD<AF4>>)>>;
 
 fn sync_rtc(rtc: &mut Rtc, dt: &NaiveDateTime) {
     rtc.set_datetime(dt).expect("To be able to set datetime");
@@ -119,14 +119,12 @@ impl TickBuffer {
 
     pub fn down_edge_in_phase(&self, val: u32) -> bool {
         if let Some(phase) = self.phase {
-            let diff = core::cmp::min(
-                self.wrap(self.counts.len() + (val as usize) - phase),
-                self.wrap(self.counts.len() + phase - (val as usize)),
-            );
-            if diff <= THRESHOLD {
+            if (self.wrap(self.counts.len() + (val as usize) - phase) <= AFTER_PHASE_THRESHOLD)
+                || (self.wrap(self.counts.len() + phase - (val as usize)) <= BEFORE_PHASE_THRESHOLD)
+            {
                 return true;
             }
-            rprintln!("Down edge not in phase. diff; {}", diff);
+            rprintln!("Down edge not in phase. val: {}, phase: {}", val, phase);
         }
         false
     }
@@ -135,21 +133,17 @@ impl TickBuffer {
         if let Some(phase) = self.phase {
             let zero_phase = self.wrap(self.counts.len() + phase + 100);
             let one_phase = self.wrap(self.counts.len() + phase + 200);
-            let d0 = core::cmp::min(
-                self.wrap(self.counts.len() + (val as usize) - zero_phase),
-                self.wrap(self.counts.len() + zero_phase - (val as usize)),
-            );
-            let d1 = core::cmp::min(
-                self.wrap(self.counts.len() + (val as usize) - one_phase),
-                self.wrap(self.counts.len() + one_phase - (val as usize)),
-            );
-            if d0 <= THRESHOLD {
+            if (self.wrap(self.counts.len() + (val as usize) - zero_phase) <= AFTER_PHASE_THRESHOLD)
+                || (self.wrap(self.counts.len() + zero_phase - (val as usize)) <= BEFORE_PHASE_THRESHOLD)
+            {
                 return Some(false);
             }
-            if d1 <= THRESHOLD {
+            if (self.wrap(self.counts.len() + (val as usize) - zero_phase) <= AFTER_PHASE_THRESHOLD)
+                || (self.wrap(self.counts.len() + zero_phase - (val as usize)) <= BEFORE_PHASE_THRESHOLD)
+            {
                 return Some(true);
             }
-            rprintln!("Bit not in phase. diff; {}: {}", d0, d1);
+            rprintln!("Bit not in phase. val: {} zero_phase: {}, one_phase: {}", val, zero_phase, one_phase);
         }
         None
     }
@@ -179,10 +173,7 @@ impl TickBuffer {
         let mut max_val = 0;
         for p in 0..STEPS {
             let idx = p * WINDOW_SIZE;
-            integral += self.counts[idx..(idx + WINDOW_SIZE)]
-                .iter()
-                .map(|x| *x as u32)
-                .sum::<u32>();
+            integral += self.counts[idx..(idx + WINDOW_SIZE)].iter().map(|x| *x as u32).sum::<u32>();
         }
         for idx in 0..self.counts.len() {
             if integral > max_val {
@@ -322,16 +313,10 @@ const APP: () = {
         let i2c = I2c::new(device.I2C1, (scl, sda), 400.khz(), clocks);
         let mut ht16k33 = HT16K33::new(i2c, DISP_I2C_ADDR);
         ht16k33.initialize().expect("Failed to initialize ht16k33");
-        ht16k33
-            .set_display(Display::ON)
-            .expect("Could not turn on the display!");
-        ht16k33
-            .set_dimming(Dimming::BRIGHTNESS_MAX)
-            .expect("Could not set dimming!");
+        ht16k33.set_display(Display::ON).expect("Could not turn on the display!");
+        ht16k33.set_dimming(Dimming::BRIGHTNESS_MAX).expect("Could not set dimming!");
         display_error(&mut ht16k33, 0);
-        ht16k33
-            .write_display_buffer()
-            .expect("Could not write 7-segment display");
+        ht16k33.write_display_buffer().expect("Could not write 7-segment display");
         let mut pwr = device.PWR;
         let rtc = Rtc::new(device.RTC, 255, 127, false, &mut pwr);
 
