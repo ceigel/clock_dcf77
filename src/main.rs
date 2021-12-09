@@ -3,73 +3,72 @@
 
 use panic_rtt_target as _;
 
-use cortex_m::peripheral::DWT;
-use feather_f405::hal as stm32f4xx_hal;
-use feather_f405::{hal::prelude::*, pac, setup_clocks};
+use atsamd_hal as hal;
+use atsamd_hal::{pac, prelude::*, time::Hertz};
+use hal::clock::GenericClockController;
+use hal::gpio::v2::pin::{self, FloatingInterrupt, Pin, Pins, PushPullOutput};
+use pac::Peripherals;
 use rtic::app;
 use rtt_target::{rprintln, rtt_init_print};
-use stm32f4xx_hal::gpio::{gpioa, gpioc, Alternate, Output, PushPull, AF2};
-use stm32f4xx_hal::time::Hertz;
 
-#[app(device = feather_f405::hal::stm32, monotonic = rtic::cyccnt::CYCCNT, peripherals = true)]
+#[app(device = atsamd_hal::pac,  peripherals = true)]
 const APP: () = {
     struct Resources {
-        dcf_pin: gpioa::PA6<Alternate<2>>,
-        debug_pin: gpioc::PC6<Output<PushPull>>,
-        timer: pac::TIM3,
+        dcf_pin: Pin<pin::PA00, FloatingInterrupt>,
+        debug_pin: Pin<pin::PA01, PushPullOutput>,
+        timer: pac::TC3,
     }
     #[init(spawn=[])]
     fn init(cx: init::Context) -> init::LateResources {
         rtt_init_print!();
-        let mut core = cx.core;
-        let device = cx.device;
-        core.DCB.enable_trace();
-        DWT::unlock();
-        core.DWT.enable_cycle_counter();
+        rprintln!("Initializing");
+        let mut device: Peripherals = cx.device;
 
-        let rcc = device.RCC;
-        rcc.apb1enr.write(|w| w.tim3en().set_bit());
-        rcc.apb1rstr.write(|w| w.tim3rst().set_bit());
-        rcc.apb1rstr.write(|w| w.tim3rst().clear_bit());
-        let clocks = setup_clocks(rcc);
+        let mut clocks = GenericClockController::with_external_32kosc(device.GCLK, &mut device.PM, &mut device.SYSCTRL, &mut device.NVMCTRL);
 
-        let gpioa = device.GPIOA.split();
-        let pin = gpioa.pa6.into_floating_input().into_alternate::<AF2>();
+        let pins = Pins::new(device.PORT);
+        let dcf_pin: Pin<pin::PA00, FloatingInterrupt> = pins.pa00.into();
 
         // Use this pin for debugging decoded signal state with oscilloscope
-        let gpioc = device.GPIOC.split();
-        let output_pin = gpioc.pc6.into_push_pull_output();
-        let timer = device.TIM3;
-        let clock_freq: Hertz = 10.khz().into();
-        let psc = ((2 * clocks.pclk1().0) / clock_freq.0 as u32) as u16 - 1;
+        let output_pin = pins.pa01.into_push_pull_output();
 
-        timer.psc.write(|w| w.psc().bits(psc));
-        timer.arr.write(|w| w.arr().bits(10_000));
+        let gclk0 = clocks.gclk0();
+        let timer_clock = clocks.tcc2_tc3(&gclk0);
+        rprintln!("Timer clock: {}", timer_clock.map(|tck| tck.freq().0).unwrap_or(0));
+        let timer = device.TC3;
 
-        timer.cr1.modify(|_, w| w.urs().set_bit());
-        timer.egr.write(|w| w.ug().set_bit());
-        timer.cr1.modify(|_, w| w.urs().clear_bit());
+        device.PM.apbcmask.modify(|_, w| w.tc3_().set_bit());
 
-        timer.ccmr1_input().write(|w| {
-            w.cc1s().ti1();
-            w.ic1f().fdts_div32_n8();
+        let count = timer.count32_mut();
+        count.ctrla.modify(|_, w| w.enable().clear_bit());
+        while count.status.read().syncbusy().bit_is_set() {}
+
+        count.ctrla.write(|w| w.swrst().set_bit());
+        while count.status.read().syncbusy().bit_is_set() {}
+
+        while count.ctrla.read().bits() & 1 != 0 {}
+
+        count.ctrlc.modify(|_, w| {
+            w.cpten0().set_bit();
+            w.cpten1().set_bit();
+            w
+        });
+        count.evctrl.modify(|_, w| {
+            w.tcei().set_bit();
+            w.evact().pwp();
+            //w.tcinv().set_bit();
+            w
+        });
+        count.ctrla.modify(|_, w| {
+            w.prescaler().div1024();
+            w.runstdby().set_bit();
+            w.enable().set_bit();
             w
         });
 
-        timer.ccer.write(|w| {
-            w.cc1p().set_bit();
-            w.cc1np().clear_bit();
-            w.cc1e().set_bit();
-            w
-        });
-        timer.dier.write(|w| w.cc1ie().set_bit());
-        timer.cr1.modify(|_, w| {
-            w.cen().set_bit();
-            w
-        });
         rprintln!("Init successful");
         init::LateResources {
-            dcf_pin: pin,
+            dcf_pin: dcf_pin,
             debug_pin: output_pin,
             timer,
         }
@@ -82,9 +81,10 @@ const APP: () = {
         loop {}
     }
 
+    /*<S-F6>
     #[task(binds = TIM3, priority=2, resources=[timer, dcf_pin, debug_pin])]
     fn tim3(cx: tim3::Context) {
-        let timer: &mut pac::TIM3 = cx.resources.timer;
+        let timer: &mut pac::TCC2 = cx.resources.timer;
         let capture = timer.ccr1.read().bits();
         let flags = timer.sr.read().bits();
         timer.sr.modify(|_, w| {
@@ -95,4 +95,5 @@ const APP: () = {
         let msg = if capture > 15000 { " minute mark" } else { "" };
         rprintln!("tick {}, flags: {:b}{}", capture, flags, msg);
     }
+    */
 };

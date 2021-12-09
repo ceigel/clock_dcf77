@@ -1,8 +1,8 @@
 MEMORY
 {
-  FLASH : ORIGIN   = 0x08000000, LENGTH = 1M
-  RAM : ORIGIN     = 0x20000000, LENGTH = 128K
-  CCM_RAM : ORIGIN = 0x10000000, LENGTH = 64K
+   /* Leave 8k for the default bootloader on the Feather M0 */
+  FLASH (rx) : ORIGIN = 0x00000000 + 8K, LENGTH = 256K - 8K
+  RAM : ORIGIN     = 0x20000000, LENGTH = 32K
 }
 
 _stack_start = ORIGIN(RAM) + LENGTH(RAM);
