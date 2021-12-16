@@ -4,51 +4,63 @@
 use panic_rtt_target as _;
 
 use atsamd_hal as hal;
-use atsamd_hal::{pac, prelude::*, time::Hertz};
-use hal::clock::{EicClock, Evsys0Clock, GenericClockController, Tcc2Tc3Clock};
-use hal::gpio::v2::pin::{self, FloatingInterrupt, Pin, Pins, PushPullOutput};
+use atsamd_hal::pac;
+use hal::clock::{ClockGenId, ClockSource, EicClock, Evsys0Clock, GenericClockController, Tcc0Tcc1Clock};
+use hal::gpio::v2::pin::{self, Pin, Pins, PullUpInterrupt, PushPullOutput};
 use pac::Peripherals;
 use rtic::app;
 use rtt_target::{rprintln, rtt_init_print};
 
-fn init_timer(timer: &mut pac::TC3, pm: &mut pac::PM, tc3_clock: &Option<Tcc2Tc3Clock>) {
-    if tc3_clock.is_none() {
+fn init_timer(timer: &mut pac::TCC0, pm: &mut pac::PM, tcc0_clock: &Option<Tcc0Tcc1Clock>) {
+    if tcc0_clock.is_none() {
         return;
     }
 
-    pm.apbcmask.modify(|_, w| w.tc3_().set_bit());
+    pm.apbcmask.modify(|_, w| w.tcc0_().set_bit());
 
-    let count = timer.count32_mut();
+    timer.ctrla.write(|w| w.enable().clear_bit());
+    while timer.syncbusy.read().enable().bit_is_set() {}
 
-    count.ctrla.write(|w| w.swrst().set_bit());
-    while count.status.read().syncbusy().bit_is_set() {}
+    timer.ctrla.write(|w| w.swrst().set_bit());
+    while timer.syncbusy.read().swrst().bit_is_set() {}
 
-    while count.ctrla.read().bits() & 1 != 0 {}
+    timer.ctrlbset.write(|w| {
+        // timer up when the direction bit is zero
+        w.dir().clear_bit();
+        // Periodic
+        w.oneshot().clear_bit()
+    });
 
-    count.evctrl.write(|w| {
-        w.tcei().set_bit();
-        w.evact().pwp();
-        //w.tcinv().set_bit();
+    timer.wave.write(|w| w.wavegen().nfrq());
+    timer.per().write(|w| unsafe { w.per().bits(8000) });
+    timer.intenclr.write(|w| {
+        w.ovf().set_bit();
         w
     });
-    count.ctrla.modify(|_, w| {
-        w.prescaler().div1024();
-        w.runstdby().clear_bit();
-        w.wavegen().nfrq();
+
+    timer.intenset.write(|w| {
+        w.mc0().set_bit();
+        w.mc1().set_bit();
+        w.err().set_bit();
         w
     });
-    count.ctrlc.write(|w| {
+    timer.ctrla.modify(|_, w| {
+        w.prescaler().div64();
         w.cpten0().set_bit();
         w.cpten1().set_bit();
         w
     });
-    count.intenset.write(|w| {
-        w.mc0().set_bit();
-        w.mc1().set_bit();
+    timer.evctrl.write(|w| {
+        w.mcei0().set_bit();
+        w.mcei1().set_bit();
+        w.evact1().ppw();
+        w.tcei0().set_bit();
+        w.tcinv0().set_bit();
         w
     });
-    while count.status.read().syncbusy().bit_is_set() {}
-    count.ctrla.modify(|_, w| w.enable().set_bit());
+
+    timer.ctrla.modify(|_, w| w.enable().set_bit());
+    while timer.syncbusy.read().enable().bit_is_set() {}
 }
 
 fn init_eic(eic: &mut pac::EIC, pm: &mut pac::PM, _eic_clock: &Option<EicClock>) {
@@ -57,40 +69,42 @@ fn init_eic(eic: &mut pac::EIC, pm: &mut pac::PM, _eic_clock: &Option<EicClock>)
     while eic.status.read().syncbusy().bit_is_set() || eic.ctrl.read().swrst().bit_is_set() {}
 
     eic.config[0].modify(|_, w| {
-        w.filten0().set_bit();
-        w.sense0().both();
+        w.filten2().set_bit();
+        w.sense2().fall();
         w
     });
     //no interrupt
-    eic.intenclr.modify(|_, w| w.extint0().set_bit());
+    eic.intenclr.modify(|_, w| w.extint2().set_bit());
 
     //no wakeup
-    eic.wakeup.modify(|_, w| w.wakeupen0().clear_bit());
+    eic.wakeup.modify(|_, w| w.wakeupen2().clear_bit());
 
     //with event
-    eic.evctrl.modify(|_, w| w.extinteo0().set_bit());
-    while eic.status.read().syncbusy().bit_is_set() {}
+    eic.evctrl.modify(|_, w| w.extinteo2().set_bit());
+
     eic.ctrl.modify(|_, w| w.enable().set_bit());
+    while eic.status.read().syncbusy().bit_is_set() {}
 }
 
 fn init_evsys(evsys: &mut pac::EVSYS, pm: &mut pac::PM, _eic_clock: &Option<Evsys0Clock>) {
     pm.apbcmask.modify(|_, w| w.evsys_().set_bit());
+    evsys.ctrl.write(|w| w.swrst().set_bit());
     evsys.user.write(|w| unsafe {
         w.channel().bits(1); //Channel 0 (n+1)
-        w.user().bits(0x12); //TC3
+        w.user().bits(0x04); //TCC0 EV1
         w
     });
     evsys.channel.write(|w| {
         unsafe {
             w.channel().bits(0); // Channel 0
-            w.evgen().bits(0x0C);
+            w.evgen().bits(0x0E); // EXTINT2
         }
-        w.edgsel().no_evt_output();
+        w.edgsel().both_edges();
         w.path().asynchronous();
         w
     });
 
-    while evsys.chstatus.read().usrrdy0().bit_is_set() {}
+    while evsys.chstatus.read().usrrdy0().bit_is_clear() {}
 }
 
 fn rtt_init_done() {
@@ -100,34 +114,38 @@ fn rtt_init_done() {
 #[app(device = atsamd_hal::pac,  peripherals = true)]
 const APP: () = {
     struct Resources {
-        dcf_pin: Pin<pin::PA00, FloatingInterrupt>,
-        debug_pin: Pin<pin::PA01, PushPullOutput>,
-        timer: pac::TC3,
+        dcf_pin: Pin<pin::PA02, PullUpInterrupt>,
+        debug_pin: Pin<pin::PA17, PushPullOutput>,
+        timer: pac::TCC0,
     }
     #[init(spawn=[])]
     fn init(cx: init::Context) -> init::LateResources {
         rtt_init_print!();
         rtt_init_done();
         let mut device: Peripherals = cx.device;
-
         let mut clocks = GenericClockController::with_external_32kosc(device.GCLK, &mut device.PM, &mut device.SYSCTRL, &mut device.NVMCTRL);
+        let tc = clocks
+            .configure_gclk_divider_and_source(ClockGenId::GCLK1, 375, ClockSource::DFLL48M, true) // clock divider 64, 2000 counts/s, clock period: 8000
+            .expect("To set peripherals clock");
 
         let pins = Pins::new(device.PORT);
-        let dcf_pin: Pin<pin::PA00, FloatingInterrupt> = pins.pa00.into();
+        let dcf_pin: Pin<pin::PA02, PullUpInterrupt> = pins.pa02.into();
 
         // Use this pin for debugging decoded signal state with oscilloscope
-        let output_pin = pins.pa01.into_push_pull_output();
+        let output_pin = pins.pa17.into_push_pull_output();
 
-        let gclk0 = clocks.gclk0();
-        let timer_clock = clocks.tcc2_tc3(&gclk0);
+        let timer_clock = clocks.tcc0_tcc1(&tc);
         rprintln!("Timer clock: {}", timer_clock.as_ref().map(|tck| tck.freq().0).unwrap_or(0));
-        let mut timer = device.TC3;
+        let mut timer = device.TCC0;
         init_timer(&mut timer, &mut device.PM, &timer_clock);
-        init_eic(&mut device.EIC, &mut device.PM, &clocks.eic(&gclk0));
-        init_evsys(&mut device.EVSYS, &mut device.PM, &clocks.evsys0(&gclk0));
+        rprintln!("Timer init done");
+        init_eic(&mut device.EIC, &mut device.PM, &clocks.eic(&tc));
+        rprintln!("EIC init done");
+        init_evsys(&mut device.EVSYS, &mut device.PM, &clocks.evsys0(&tc));
+        rprintln!("EVSYS init done");
         rprintln!("Init successful");
         init::LateResources {
-            dcf_pin: dcf_pin,
+            dcf_pin,
             debug_pin: output_pin,
             timer,
         }
@@ -140,31 +158,28 @@ const APP: () = {
         loop {}
     }
 
-    #[task(binds = TC3, priority=2, resources=[timer, dcf_pin, debug_pin])]
-    fn tc3(cx: tc3::Context) {
-        let timer: &mut pac::TC3 = cx.resources.timer;
-        let counter = timer.count32();
-        let (mc0, mc1) = (counter.cc[0].read().bits(), counter.cc[1].read().bits());
-        let flags = counter.intflag.read();
+    #[task(binds = TCC0, priority=8, resources=[timer, dcf_pin, debug_pin])]
+    fn tcc0(cx: tcc0::Context) {
+        let timer: &mut pac::TCC0 = cx.resources.timer;
+        rprintln!("Timer interrupt");
+        let flags = timer.intflag.read();
+        let cc0 = timer.cc()[0].read().cc().bits();
+        let cc1 = timer.cc()[1].read().cc().bits();
         if flags.ovf().bit_is_set() {
             rprintln!("Overflow");
+            timer.intflag.modify(|_, w| w.ovf().set_bit());
         }
         if flags.err().bit_is_set() {
             rprintln!("Error");
-        }
-        if flags.syncrdy().bit_is_set() {
-            rprintln!("Sync ready");
+            timer.intflag.modify(|_, w| w.err().set_bit());
         }
         if flags.mc0().bit_is_set() {
-            rprintln!("MC0: {}", mc0);
+            rprintln!("CC0: {}", cc0);
+            timer.intflag.modify(|_, w| w.mc0().set_bit());
         }
         if flags.mc1().bit_is_set() {
-            rprintln!("MC1: {}", mc1);
+            rprintln!("CC1: {}", cc1);
+            timer.intflag.modify(|_, w| w.mc1().set_bit());
         }
-        counter.intflag.write(|w| {
-            w.mc0().clear_bit();
-            w.mc1().clear_bit();
-            w
-        });
     }
 };

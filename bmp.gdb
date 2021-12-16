@@ -9,9 +9,10 @@ set backtrace limit 32
 monitor swdp_scan
 att 1
 
+monitor rtt ident SEGGER_RTT
 monitor rtt
 
 load
 # start the process but immediately halt the processor
-b main
-continue
+b rtt_init_done
+run
