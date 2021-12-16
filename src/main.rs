@@ -12,10 +12,7 @@ use rtic::app;
 use rtt_target::{rprintln, rtt_init_print};
 
 fn init_timer(timer: &mut pac::TCC0, pm: &mut pac::PM, tcc0_clock: &Option<Tcc0Tcc1Clock>) {
-    if tcc0_clock.is_none() {
-        return;
-    }
-
+    tcc0_clock.as_ref().expect("To have tcc0 clock");
     pm.apbcmask.modify(|_, w| w.tcc0_().set_bit());
 
     timer.ctrla.write(|w| w.enable().clear_bit());
@@ -32,7 +29,7 @@ fn init_timer(timer: &mut pac::TCC0, pm: &mut pac::PM, tcc0_clock: &Option<Tcc0T
     });
 
     timer.wave.write(|w| w.wavegen().nfrq());
-    timer.per().write(|w| unsafe { w.per().bits(8000) });
+    timer.per().write(|w| unsafe { w.per().bits(16_000) });
     timer.intenclr.write(|w| {
         w.ovf().set_bit();
         w
@@ -53,9 +50,9 @@ fn init_timer(timer: &mut pac::TCC0, pm: &mut pac::PM, tcc0_clock: &Option<Tcc0T
     timer.evctrl.write(|w| {
         w.mcei0().set_bit();
         w.mcei1().set_bit();
-        w.evact1().ppw();
-        w.tcei0().set_bit();
-        w.tcinv0().set_bit();
+        w.evact1().pwp();
+        w.tcei1().set_bit();
+        w.tcinv1().set_bit();
         w
     });
 
@@ -63,14 +60,19 @@ fn init_timer(timer: &mut pac::TCC0, pm: &mut pac::PM, tcc0_clock: &Option<Tcc0T
     while timer.syncbusy.read().enable().bit_is_set() {}
 }
 
-fn init_eic(eic: &mut pac::EIC, pm: &mut pac::PM, _eic_clock: &Option<EicClock>) {
+fn init_eic(eic: &mut pac::EIC, pm: &mut pac::PM, eic_clock: &Option<EicClock>) {
+    eic_clock.as_ref().expect("To have eic clock");
     pm.apbamask.modify(|_, w| w.eic_().set_bit());
-    eic.ctrl.write(|w| w.swrst().set_bit());
+    eic.ctrl.write(|w| {
+        w.enable().clear_bit();
+        w.swrst().set_bit();
+        w
+    });
     while eic.status.read().syncbusy().bit_is_set() || eic.ctrl.read().swrst().bit_is_set() {}
 
     eic.config[0].modify(|_, w| {
-        w.filten2().set_bit();
-        w.sense2().fall();
+        w.filten2().clear_bit();
+        w.sense2().both();
         w
     });
     //no interrupt
@@ -86,12 +88,13 @@ fn init_eic(eic: &mut pac::EIC, pm: &mut pac::PM, _eic_clock: &Option<EicClock>)
     while eic.status.read().syncbusy().bit_is_set() {}
 }
 
-fn init_evsys(evsys: &mut pac::EVSYS, pm: &mut pac::PM, _eic_clock: &Option<Evsys0Clock>) {
+fn init_evsys(evsys: &mut pac::EVSYS, pm: &mut pac::PM, evsys_clock: &Option<Evsys0Clock>) {
+    evsys_clock.as_ref().expect("To have evsys clock");
     pm.apbcmask.modify(|_, w| w.evsys_().set_bit());
     evsys.ctrl.write(|w| w.swrst().set_bit());
     evsys.user.write(|w| unsafe {
         w.channel().bits(1); //Channel 0 (n+1)
-        w.user().bits(0x04); //TCC0 EV1
+        w.user().bits(0x05); //TCC0 EV0
         w
     });
     evsys.channel.write(|w| {
@@ -103,7 +106,6 @@ fn init_evsys(evsys: &mut pac::EVSYS, pm: &mut pac::PM, _eic_clock: &Option<Evsy
         w.path().asynchronous();
         w
     });
-
     while evsys.chstatus.read().usrrdy0().bit_is_clear() {}
 }
 
@@ -116,6 +118,8 @@ const APP: () = {
     struct Resources {
         dcf_pin: Pin<pin::PA02, PullUpInterrupt>,
         debug_pin: Pin<pin::PA17, PushPullOutput>,
+        eic: pac::EIC,
+        evsys: pac::EVSYS,
         timer: pac::TCC0,
     }
     #[init(spawn=[])]
@@ -125,7 +129,7 @@ const APP: () = {
         let mut device: Peripherals = cx.device;
         let mut clocks = GenericClockController::with_external_32kosc(device.GCLK, &mut device.PM, &mut device.SYSCTRL, &mut device.NVMCTRL);
         let tc = clocks
-            .configure_gclk_divider_and_source(ClockGenId::GCLK1, 375, ClockSource::DFLL48M, true) // clock divider 64, 2000 counts/s, clock period: 8000
+            .configure_gclk_divider_and_source(ClockGenId::GCLK3, 187, ClockSource::DFLL48M, true) // clock divider 64, 4000 counts/s, clock period: 16000
             .expect("To set peripherals clock");
 
         let pins = Pins::new(device.PORT);
@@ -148,6 +152,8 @@ const APP: () = {
             dcf_pin,
             debug_pin: output_pin,
             timer,
+            eic: device.EIC,
+            evsys: device.EVSYS,
         }
     }
 
