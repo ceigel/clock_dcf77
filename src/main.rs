@@ -15,21 +15,14 @@ fn init_timer(timer: &mut pac::TCC0, pm: &mut pac::PM, tcc0_clock: &Option<Tcc0T
     tcc0_clock.as_ref().expect("To have tcc0 clock");
     pm.apbcmask.modify(|_, w| w.tcc0_().set_bit());
 
-    timer.ctrla.write(|w| w.enable().clear_bit());
-    while timer.syncbusy.read().enable().bit_is_set() {}
-
-    timer.ctrla.write(|w| w.swrst().set_bit());
-    while timer.syncbusy.read().swrst().bit_is_set() {}
-
-    timer.ctrlbset.write(|w| {
-        // timer up when the direction bit is zero
-        w.dir().clear_bit();
-        // Periodic
-        w.oneshot().clear_bit()
+    timer.ctrla.write(|w| {
+        w.enable().clear_bit();
+        w.swrst().set_bit();
+        w
     });
+    while timer.syncbusy.read().swrst().bit_is_set() || timer.syncbusy.read().enable().bit_is_set() {}
 
-    timer.wave.write(|w| w.wavegen().nfrq());
-    timer.per().write(|w| unsafe { w.per().bits(16_000) });
+    timer.per().write(|w| unsafe { w.per().bits(4_000) });
     timer.intenclr.write(|w| {
         w.ovf().set_bit();
         w
@@ -42,7 +35,7 @@ fn init_timer(timer: &mut pac::TCC0, pm: &mut pac::PM, tcc0_clock: &Option<Tcc0T
         w
     });
     timer.ctrla.modify(|_, w| {
-        w.prescaler().div64();
+        w.prescaler().div256();
         w.cpten0().set_bit();
         w.cpten1().set_bit();
         w
@@ -50,9 +43,9 @@ fn init_timer(timer: &mut pac::TCC0, pm: &mut pac::PM, tcc0_clock: &Option<Tcc0T
     timer.evctrl.write(|w| {
         w.mcei0().set_bit();
         w.mcei1().set_bit();
-        w.evact1().pwp();
+        w.evact1().ppw();
         w.tcei1().set_bit();
-        w.tcinv1().set_bit();
+        //w.tcinv1().set_bit();
         w
     });
 
@@ -71,8 +64,8 @@ fn init_eic(eic: &mut pac::EIC, pm: &mut pac::PM, eic_clock: &Option<EicClock>) 
     while eic.status.read().syncbusy().bit_is_set() || eic.ctrl.read().swrst().bit_is_set() {}
 
     eic.config[0].modify(|_, w| {
-        w.filten2().clear_bit();
-        w.sense2().both();
+        w.filten2().set_bit();
+        w.sense2().low();
         w
     });
     //no interrupt
@@ -129,7 +122,7 @@ const APP: () = {
         let mut device: Peripherals = cx.device;
         let mut clocks = GenericClockController::with_external_32kosc(device.GCLK, &mut device.PM, &mut device.SYSCTRL, &mut device.NVMCTRL);
         let tc = clocks
-            .configure_gclk_divider_and_source(ClockGenId::GCLK3, 187, ClockSource::DFLL48M, true) // clock divider 64, 4000 counts/s, clock period: 16000
+            .configure_gclk_divider_and_source(ClockGenId::GCLK3, 187, ClockSource::DFLL48M, true) // clock divider 256, 1002 counts/s, clock period: 4000
             .expect("To set peripherals clock");
 
         let pins = Pins::new(device.PORT);
@@ -167,8 +160,9 @@ const APP: () = {
     #[task(binds = TCC0, priority=8, resources=[timer, dcf_pin, debug_pin])]
     fn tcc0(cx: tcc0::Context) {
         let timer: &mut pac::TCC0 = cx.resources.timer;
-        rprintln!("Timer interrupt");
         let flags = timer.intflag.read();
+        let flag_bits = flags.bits();
+        rprintln!("Timer interrupt: 0x{:#x}", flag_bits);
         let cc0 = timer.cc()[0].read().cc().bits();
         let cc1 = timer.cc()[1].read().cc().bits();
         if flags.ovf().bit_is_set() {
