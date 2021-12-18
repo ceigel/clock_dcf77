@@ -1,7 +1,7 @@
 [package]
 # TODO(1) fix `authors` and `name` if you didn't use `cargo-generate`
 authors = ["Cristian Eigel <cristian.eigel@esrlabs.com>"]
-name = "clock-dcf77"
+name = "clock_dcf77"
 edition = "2018"
 version = "0.1.0"
 
@@ -11,11 +11,11 @@ cortex-m-rtic = "0.5.8"
 panic-rtt-target = {version="0.1.2", features = ["cortex-m"] }
 rtt-target = {version= "0.3.1",  features = ["cortex-m"] }
 atsamd-hal = {version = "0.13.0", features = [ "samd21g-rt"]}
+chrono = { version = "0.4.19", default-features = false }
+rtcc = "0.2.1"
+ht16k33 = { version = "0.4.0", default-features = false }
+adafruit-7segment = { version = "0.1.0", default-features = false  }
 
-
-[dev-dependencies]
-rtt-target = { version = "0.3", features = ["cortex-m"] }
-panic-rtt-target = { version = "0.1", features = ["cortex-m"] }
 
 [profile.dev]
 debug=true

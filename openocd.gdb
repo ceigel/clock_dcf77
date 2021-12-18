@@ -40,5 +40,3 @@ load
 
 break rtt_init_done
 # start the process but immediately halt the processor
-continue
-monitor rtt start
