@@ -11,6 +11,7 @@ att 1
 
 monitor rtt ident SEGGER_RTT
 monitor rtt
+monitor rtt channel 0
 
 load
 # start the process but immediately halt the processor
