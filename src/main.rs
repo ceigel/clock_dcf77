@@ -22,13 +22,14 @@ use ht16k33::{Dimming, Display, HT16K33};
 use pac::Peripherals;
 use rtic::app;
 use rtt_target::{rprintln, rtt_init, set_print_channel, UpChannel};
-use time_display::{blink_second, display_error, display_time};
+use time_display::SegmentDisplayAdapter;
 
 const DISP_I2C_ADDR: u8 = 0x77;
 pub const PHASE_MAX: u8 = 60;
 const TICKS_PER_SECOND: u32 = 3000;
-const TIMER_MAX: u32 = 4 * TICKS_PER_SECOND;
-const TIMER_RANGE: u32 = 4000;
+const MULTIPLIER: u32 = 4;
+const TIMER_MAX: u32 = MULTIPLIER * TICKS_PER_SECOND;
+const TIMER_RANGE: u32 = MULTIPLIER * 1000;
 const AFTER_PHASE_THRESHOLD: usize = 30;
 const BEFORE_PHASE_THRESHOLD: usize = 10;
 pub const CUTOFF_THRESHOLD: u8 = 198;
@@ -53,6 +54,8 @@ pub struct TickBuffer {
     down_edge: Option<u32>,
     up_edge: Option<u32>,
     pub tick_count: u8,
+    pub noise_max: u32,
+    pub integral_max: u32,
 }
 
 impl Default for TickBuffer {
@@ -65,12 +68,19 @@ impl Default for TickBuffer {
             down_edge: None,
             up_edge: None,
             tick_count: 0,
+            noise_max: 0,
+            integral_max: 0,
         }
     }
 }
 
 impl core::fmt::Display for TickBuffer {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_fmt(format_args!("bins = [ {}", self.counts[0]))?;
+        for x in &self.counts[1..] {
+            formatter.write_fmt(format_args!(", {}", x))?;
+        }
+        formatter.write_fmt(format_args!("]; "))?;
         formatter.write_fmt(format_args!("integral = [ {}", self.integral[0]))?;
         for x in &self.integral[1..] {
             formatter.write_fmt(format_args!(", {}", x))?;
@@ -89,6 +99,7 @@ fn increment_vals(slice: &mut [u8], add: i8) {
     }
 }
 
+#[derive(PartialEq, Debug, Copy, Clone)]
 pub enum Edge {
     Down,
     Up,
@@ -173,14 +184,14 @@ impl TickBuffer {
         const STEPS: usize = 2;
         let mut integral: u32 = 0;
         let mut max_index = 0;
-        let mut max_val = 0;
+        self.integral_max = 0;
         for p in 0..STEPS {
             let idx = p * WINDOW_SIZE;
-            integral += self.counts[idx..(idx + WINDOW_SIZE)].iter().map(|x| *x as u32).sum::<u32>();
+            integral += self.counts[0..(idx + WINDOW_SIZE)].iter().map(|x| *x as u32).sum::<u32>();
         }
         for idx in 0..self.counts.len() {
-            if integral > max_val {
-                max_val = integral;
+            if integral > self.integral_max {
+                self.integral_max = integral;
                 max_index = idx;
             }
             self.integral[idx] = integral;
@@ -190,7 +201,21 @@ impl TickBuffer {
                 integral += self.counts[self.wrap(idx + step)] as u32;
             }
         }
-        rprintln!("Compute phase: {} ({})", max_index, max_val);
+        let noise_index = max_index + WINDOW_SIZE * STEPS;
+        self.noise_max = 0;
+
+        for idx in 0..WINDOW_SIZE {
+            for p in 0..STEPS {
+                let jdx = noise_index + idx * (p + 1);
+                self.noise_max += (self.counts[self.wrap(jdx)] as u32) * ((STEPS - p) as u32);
+            }
+        }
+        rprintln!(
+            "Compute phase: {} max_integral {}, noise_max: {}",
+            max_index,
+            self.integral_max,
+            self.noise_max
+        );
         self.phase.replace(max_index);
     }
 
@@ -338,7 +363,7 @@ const APP: () = {
         timer: pac::TCC0,
         dcf77: DCF77Decoder,
         rtc: Rtc<ClockMode>,
-        segment_display: SegmentDisplay,
+        segment_display: SegmentDisplayAdapter,
         ticks: TickBuffer,
         #[init(None)]
         last_second_marker: Option<u32>,
@@ -346,6 +371,9 @@ const APP: () = {
         tick: bool,
         #[init(None)]
         last_sync: Option<NaiveDateTime>,
+        #[init(0)]
+        sync_points: u8,
+        output2: UpChannel,
     }
 
     #[init(spawn=[])]
@@ -354,12 +382,18 @@ const APP: () = {
             up: {
                 0: {
                     size: 512
-                    mode: BlockIfFull
+                    mode: NoBlockSkip
                     name: "Up zero"
+                }
+                1: {
+                    size: 5000
+                    mode: NoBlockSkip
+                    name: "Up one"
                 }
             }
         };
         set_print_channel(channels.up.0);
+        let out2 = channels.up.1;
         rtt_init_done();
         let mut device: Peripherals = cx.device;
         let mut clocks = GenericClockController::with_external_32kosc(device.GCLK, &mut device.PM, &mut device.SYSCTRL, &mut device.NVMCTRL);
@@ -368,6 +402,11 @@ const APP: () = {
             .unwrap();
         let rtc_clock = clocks.rtc(&timer_clock).unwrap();
         let rtc = Rtc::clock_mode(device.RTC, rtc_clock.freq(), &mut device.PM);
+        unsafe {
+            let rtc = (*pac::RTC::ptr()).mode2_mut();
+            rtc.intenset.modify(|_, w| w.alarm0().set_bit());
+            rtc.mask0.modify(|_, w| w.sel().ss());
+        }
 
         let pins = Pins::new(device.PORT);
         let dcf_pin: Pin<pin::PA02, PullUpInterrupt> = pins.pa02.into();
@@ -383,7 +422,12 @@ const APP: () = {
         let mut timer = device.TCC0;
         init_timer(&mut timer, &mut device.PM, &timer_clock);
         rprintln!("Timer init done");
-        init_eic(&mut device.EIC, &mut device.PM, &clocks.eic(&tc));
+        let eic_clock = clocks
+            .configure_gclk_divider_and_source(ClockGenId::GCLK5, 1, ClockSource::XOSC32K, true)
+            .unwrap();
+        let ec = clocks.eic(&eic_clock);
+        rprintln!("EIC clock: {}", ec.as_ref().map(|tck| tck.freq().0).unwrap_or(0));
+        init_eic(&mut device.EIC, &mut device.PM, &ec);
         rprintln!("EIC init done");
         init_evsys(&mut device.EVSYS, &mut device.PM, &clocks.evsys0(&tc));
         rprintln!("EVSYS init done");
@@ -397,8 +441,8 @@ const APP: () = {
         ht16k33.initialize().expect("Failed to initialize ht16k33");
         ht16k33.set_display(Display::ON).expect("Could not turn on the display!");
         ht16k33.set_dimming(Dimming::BRIGHTNESS_MIN).expect("Could not set dimming!");
-        display_error(&mut ht16k33, 0);
-        ht16k33.write_display_buffer().expect("Could not write 7-segment display");
+        let mut segment_display = SegmentDisplayAdapter::new(ht16k33);
+        segment_display.display_error(0);
 
         rprintln!("Init successful");
         init::LateResources {
@@ -409,8 +453,9 @@ const APP: () = {
             evsys: device.EVSYS,
             dcf77: DCF77Decoder::new(),
             rtc,
-            segment_display: ht16k33,
+            segment_display,
             ticks: TickBuffer::default(),
+            output2: out2,
         }
     }
 
@@ -423,28 +468,31 @@ const APP: () = {
 
     #[task(resources = [segment_display])]
     fn show_tick(cx: show_tick::Context, tick: bool) {
-        // blink_second(tick, cx.resources.segment_display);
+        cx.resources.segment_display.blink_second(tick);
     }
 
     #[task(resources = [segment_display, last_sync, rtc])]
-    fn show_time(mut cx: show_time::Context) {
+    fn show_time(mut cx: show_time::Context, sync_points: u8) {
         rprintln!("Show time");
-        let (h, m) = cx.resources.rtc.lock(|rtc| {
-            let h = rtc.current_time().hours;
-            let m = rtc.current_time().minutes;
-            (h, m)
-        });
+        if cx.resources.last_sync.lock(|ls| ls.clone()).is_some() {
+            let (h, m) = cx.resources.rtc.lock(|rtc| {
+                let h = rtc.current_time().hours;
+                let m = rtc.current_time().minutes;
+                (h, m)
+            });
 
-        let hours = match h {
-            24.. => h - 12,
-            _ => h,
-        };
+            let hours = match h {
+                24.. => h - 12,
+                _ => h,
+            };
 
-        let display = cx.resources.segment_display;
-        display_time(display, hours, m, 0);
+            cx.resources.segment_display.display_time(hours, m, sync_points);
+        } else {
+            cx.resources.segment_display.display_error(sync_points);
+        }
     }
 
-    #[task(binds = TCC0, priority=8, resources=[timer, dcf_pin, debug_pin, dcf77, rtc, last_sync, evsys, ticks, last_second_marker], spawn=[show_tick, show_time])]
+    #[task(binds = TCC0, priority=8, resources=[timer, dcf_pin, debug_pin, dcf77, rtc, last_sync, output2, sync_points, evsys, ticks, last_second_marker], spawn=[show_tick, show_time])]
     fn tcc0(cx: tcc0::Context) {
         let dcf_pin = cx.resources.dcf_pin;
         let decoder = cx.resources.dcf77;
@@ -460,24 +508,28 @@ const APP: () = {
             let cc0 = timer.cc()[0].read().cc().bits() / 3;
             timer.intflag.modify(|_, w| w.mc0().set_bit());
             let level_low = dcf_pin.is_low().unwrap();
+            let edge = if level_low { Edge::Down } else { Edge::Up };
 
             let tick = cc0 % 1000;
             rprintln!("{} - {}", tick, level_low);
-            let to_print = binner.tick_count == PHASE_MAX - 1;
-            binner.add_tick(tick, if level_low { Edge::Down } else { Edge::Up });
+            let should_print = binner.tick_count == PHASE_MAX - 1;
+            binner.add_tick(tick, edge);
 
-            cx.spawn.show_tick(level_low).ok();
+            if should_print {
+                writeln!(cx.resources.output2, "{}", binner).expect("to write data");
+            }
+            cx.spawn.show_tick(!level_low).ok();
             if level_low && binner.down_edge_in_phase(tick) {
-                //  debug_pin.set_low().unwrap();
+                debug_pin.set_low().unwrap();
                 let last_second_marker = cx.resources.last_second_marker;
                 if minute_detected(cc0, *last_second_marker) {
                     decoder.add_minute()
                 }
                 last_second_marker.replace(cc0);
             }
-            if !level_low {
+            if edge == Edge::Up {
                 if let Some(bit) = binner.compute_bit(tick) {
-                    //     debug_pin.set_high().unwrap();
+                    debug_pin.set_high().unwrap();
                     decoder.add_second(bit);
                 }
             }
@@ -492,13 +544,31 @@ const APP: () = {
                 }
                 Ok(dt) => {
                     sync_rtc(cx.resources.rtc, &dt);
+                    *cx.resources.sync_points |= 1;
+                    cx.spawn.show_time(*cx.resources.sync_points).ok();
                     cx.resources.last_sync.replace(dt);
-                    cx.spawn.show_time().ok();
                     rprintln!("Good date: {:?}", dt);
                 }
             }
         }
     }
+
+    #[task(binds = RTC, resources=[sync_points], spawn=[show_time])]
+    fn rtc(mut cx: rtc::Context) {
+        let int_flags = unsafe {
+            let rtc = (*pac::RTC::ptr()).mode2_mut();
+            let flag_bits = rtc.intflag.read().bits();
+            rtc.intflag.write(|w| w.bits(flag_bits));
+            flag_bits
+        };
+        rprintln!("RTC interrupt {:#x}", int_flags);
+        let sync_points = cx.resources.sync_points.lock(|sp| {
+            *sp = *sp << 1;
+            *sp
+        });
+        cx.spawn.show_time(sync_points).ok();
+    }
+
     extern "C" {
         fn SERCOM5();
     }

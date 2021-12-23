@@ -15,5 +15,5 @@ monitor rtt channel 0
 
 load
 # start the process but immediately halt the processor
-b rtt_init_done
+b main
 run
