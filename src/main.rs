@@ -562,11 +562,12 @@ const APP: () = {
             flag_bits
         };
         rprintln!("RTC interrupt {:#x}", int_flags);
-        let sync_points = cx.resources.sync_points.lock(|sp| {
+        let old_sync_points = cx.resources.sync_points.lock(|sp| {
+            let old_sp = *sp;
             *sp = *sp << 1;
-            *sp
+            old_sp
         });
-        cx.spawn.show_time(sync_points).ok();
+        cx.spawn.show_time(old_sync_points).ok();
     }
 
     extern "C" {
