@@ -1,12 +1,20 @@
 use crate::SegmentDisplay;
 use adafruit_7segment::{AsciiChar, Index, SevenSegment};
+use crate::{Dimming, Display};
 
 pub struct SegmentDisplayAdapter {
     display: SegmentDisplay,
 }
 
 impl SegmentDisplayAdapter {
-    pub fn new(display: SegmentDisplay) -> Self {
+    pub fn new(mut display: SegmentDisplay) -> Self {
+        display.initialize().expect("Failed to initialize ht16k33");
+        display
+            .set_display(Display::ON)
+            .expect("Could not turn on the display!");
+        display
+            .set_dimming(Dimming::BRIGHTNESS_MIN)
+            .expect("Could not set dimming!");
         Self { display }
     }
 
@@ -46,5 +54,17 @@ impl SegmentDisplayAdapter {
         self.display.update_buffer_with_dot(Index::Three, dots & 2 != 0);
         self.display.update_buffer_with_dot(Index::Two, dots & 4 != 0);
         self.display.update_buffer_with_dot(Index::One, dots & 8 != 0);
+    }
+
+    pub fn blink_all(&mut self, blink_on: bool) {
+        if blink_on {
+            self.display
+                .set_display(Display::TWO_HZ)
+                .expect("Could not turn on the display!");
+        } else {
+            self.display
+                .set_display(Display::ON)
+                .expect("Could not turn on the display!");
+        }
     }
 }

@@ -12,8 +12,11 @@ use chrono::{naive::NaiveDateTime, Datelike, Timelike};
 use core::fmt::Write;
 use datetime_converter::DCF77DateTimeConverter;
 use dcf77_decoder::DCF77Decoder;
-use hal::clock::{ClockGenId, ClockSource, EicClock, Evsys0Clock, GenericClockController, Tcc0Tcc1Clock};
-use hal::gpio::v2::pin::{self, AlternateC, Pin, Pins, PullUpInterrupt, PushPullOutput};
+use hal::clock::{
+    ClockGenId, ClockSource, EicClock, Evsys0Clock, GenericClockController, Tcc0Tcc1Clock,
+};
+use hal::gpio::v2::pin::{self, AlternateC, Pin, Pins, PullUpInterrupt, PushPullOutput, Alternate, B};
+use hal::adc::Adc;
 use hal::prelude::*;
 use hal::rtc::{ClockMode, Datetime, Rtc};
 use hal::sercom::I2CMaster3;
@@ -149,16 +152,23 @@ impl TickBuffer {
             let zero_phase = self.wrap(self.counts.len() + phase + 100);
             let one_phase = self.wrap(self.counts.len() + phase + 200);
             if (self.wrap(self.counts.len() + (val as usize) - zero_phase) <= AFTER_PHASE_THRESHOLD)
-                || (self.wrap(self.counts.len() + zero_phase - (val as usize)) <= BEFORE_PHASE_THRESHOLD)
+                || (self.wrap(self.counts.len() + zero_phase - (val as usize))
+                    <= BEFORE_PHASE_THRESHOLD)
             {
                 return Some(false);
             }
             if (self.wrap(self.counts.len() + (val as usize) - one_phase) <= AFTER_PHASE_THRESHOLD)
-                || (self.wrap(self.counts.len() + one_phase - (val as usize)) <= BEFORE_PHASE_THRESHOLD)
+                || (self.wrap(self.counts.len() + one_phase - (val as usize))
+                    <= BEFORE_PHASE_THRESHOLD)
             {
                 return Some(true);
             }
-            rprintln!("Bit not in phase. val: {} zero_phase: {}, one_phase: {}", val, zero_phase, one_phase);
+            rprintln!(
+                "Bit not in phase. val: {} zero_phase: {}, one_phase: {}",
+                val,
+                zero_phase,
+                one_phase
+            );
         }
         None
     }
@@ -187,7 +197,10 @@ impl TickBuffer {
         self.integral_max = 0;
         for p in 0..STEPS {
             let idx = p * WINDOW_SIZE;
-            integral += self.counts[0..(idx + WINDOW_SIZE)].iter().map(|x| *x as u32).sum::<u32>();
+            integral += self.counts[0..(idx + WINDOW_SIZE)]
+                .iter()
+                .map(|x| *x as u32)
+                .sum::<u32>();
         }
         for idx in 0..self.counts.len() {
             if integral > self.integral_max {
@@ -250,7 +263,9 @@ fn init_timer(timer: &mut pac::TCC0, pm: &mut pac::PM, tcc0_clock: &Option<Tcc0T
         w.swrst().set_bit();
         w
     });
-    while timer.syncbusy.read().swrst().bit_is_set() || timer.syncbusy.read().enable().bit_is_set() {}
+    while timer.syncbusy.read().swrst().bit_is_set() || timer.syncbusy.read().enable().bit_is_set()
+    {
+    }
 
     timer.per().write(|w| unsafe { w.per().bits(TIMER_MAX) });
     timer.intenclr.write(|w| {
@@ -374,6 +389,10 @@ const APP: () = {
         #[init(0)]
         sync_points: u8,
         output2: UpChannel,
+        #[init(false)]
+        blinking: bool,
+        adc: Adc<pac::ADC>,
+        adc_pin: Pin<pin::PA07, Alternate<B>>
     }
 
     #[init(spawn=[])]
@@ -395,8 +414,16 @@ const APP: () = {
         set_print_channel(channels.up.0);
         let out2 = channels.up.1;
         rtt_init_done();
+
         let mut device: Peripherals = cx.device;
-        let mut clocks = GenericClockController::with_external_32kosc(device.GCLK, &mut device.PM, &mut device.SYSCTRL, &mut device.NVMCTRL);
+        let mut clocks = GenericClockController::with_external_32kosc(
+            device.GCLK,
+            &mut device.PM,
+            &mut device.SYSCTRL,
+            &mut device.NVMCTRL,
+        );
+
+
         let timer_clock = clocks
             .configure_gclk_divider_and_source(ClockGenId::GCLK3, 32, ClockSource::XOSC32K, true)
             .unwrap();
@@ -418,7 +445,10 @@ const APP: () = {
             .configure_gclk_divider_and_source(ClockGenId::GCLK4, 250, ClockSource::DFLL48M, true) // clock divider 64, 3000 counts/s, clock period: 12000
             .expect("To set peripherals clock");
         let timer_clock = clocks.tcc0_tcc1(&tc);
-        rprintln!("Timer clock: {}", timer_clock.as_ref().map(|tck| tck.freq().0).unwrap_or(0));
+        rprintln!(
+            "Timer clock: {}",
+            timer_clock.as_ref().map(|tck| tck.freq().0).unwrap_or(0)
+        );
         let mut timer = device.TCC0;
         init_timer(&mut timer, &mut device.PM, &timer_clock);
         rprintln!("Timer init done");
@@ -426,7 +456,10 @@ const APP: () = {
             .configure_gclk_divider_and_source(ClockGenId::GCLK5, 1, ClockSource::XOSC32K, true)
             .unwrap();
         let ec = clocks.eic(&eic_clock);
-        rprintln!("EIC clock: {}", ec.as_ref().map(|tck| tck.freq().0).unwrap_or(0));
+        rprintln!(
+            "EIC clock: {}",
+            ec.as_ref().map(|tck| tck.freq().0).unwrap_or(0)
+        );
         init_eic(&mut device.EIC, &mut device.PM, &ec);
         rprintln!("EIC init done");
         init_evsys(&mut device.EVSYS, &mut device.PM, &clocks.evsys0(&tc));
@@ -435,15 +468,22 @@ const APP: () = {
         let scl: Scl = pins.pa23.into();
         let sda: Sda = pins.pa22.into();
 
-        let i2c = init_i2c(&mut clocks, KiloHertz(400), device.SERCOM3, &mut device.PM, sda, scl);
+        let i2c = init_i2c(
+            &mut clocks,
+            KiloHertz(400),
+            device.SERCOM3,
+            &mut device.PM,
+            sda,
+            scl,
+        );
 
-        let mut ht16k33 = HT16K33::new(i2c, DISP_I2C_ADDR);
-        ht16k33.initialize().expect("Failed to initialize ht16k33");
-        ht16k33.set_display(Display::ON).expect("Could not turn on the display!");
-        ht16k33.set_dimming(Dimming::BRIGHTNESS_MIN).expect("Could not set dimming!");
+        let ht16k33 = HT16K33::new(i2c, DISP_I2C_ADDR);
         let mut segment_display = SegmentDisplayAdapter::new(ht16k33);
         segment_display.display_error(0);
 
+        let adc = Adc::adc(device.ADC, &mut device.PM, &mut clocks);
+        let adc_pin: Pin<pin::PA07, Alternate<B>> = pins.pa07.into();
+        cx.read_battery.spawn().unwrap();
         rprintln!("Init successful");
         init::LateResources {
             dcf_pin,
@@ -456,6 +496,8 @@ const APP: () = {
             segment_display,
             ticks: TickBuffer::default(),
             output2: out2,
+            adc,
+            adc_pin
         }
     }
 
@@ -469,6 +511,26 @@ const APP: () = {
     #[task(resources = [segment_display])]
     fn show_tick(cx: show_tick::Context, tick: bool) {
         cx.resources.segment_display.blink_second(tick);
+    }
+
+    #[task(resources = [segment_display, adc, adc_pin, blinking], schedule=[read_battery])]
+    fn read_battery(mut cx: read_battery::Context) {
+        const RESOLUTION_BITS:u32 = 10;
+        let data: u16 = cx.resources.adc.read(cx.resources.adc_pin).unwrap();
+        let max_range = 1 << RESOLUTION_BITS;
+        let voltage = ((data as f32) * 3.3) / (max_range as f32);
+        rprintln!("Battery level {} - {}", voltage, data);
+        let mid = max_range >> 1;
+        if data < mid + max_range / 4 && *cx.resources.blinking {
+            *cx.resources.blinking = true;
+            cx.resources.segment_display.lock(|sd| sd.blink_all(true));
+        } 
+        if data > mid + max_range / 2 && *cx.resources.blinking {
+            *cx.resources.blinking = false;
+            cx.resources.segment_display.lock(|sd| sd.blink_all(false));
+        }
+
+        cx.schedule.read_battery(48_000_000*60).ok();
     }
 
     #[task(resources = [segment_display, last_sync, rtc])]
