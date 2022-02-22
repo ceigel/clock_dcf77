@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+
 mod datetime_converter;
 mod dcf77_decoder;
 mod time_display;
@@ -12,19 +13,20 @@ use chrono::{naive::NaiveDateTime, Datelike, Timelike};
 use core::fmt::Write;
 use datetime_converter::DCF77DateTimeConverter;
 use dcf77_decoder::DCF77Decoder;
+use hal::adc::Adc;
 use hal::clock::{
     ClockGenId, ClockSource, EicClock, Evsys0Clock, GenericClockController, Tcc0Tcc1Clock,
 };
-use hal::gpio::v2::pin::{self, AlternateC, Pin, Pins, PullUpInterrupt, PushPullOutput, Alternate, B};
-use hal::adc::Adc;
+use hal::gpio::v2::pin::{
+    self, Alternate, AlternateC, Pin, Pins, PullUpInterrupt, PushPullOutput, B,
+};
 use hal::prelude::*;
 use hal::rtc::{ClockMode, Datetime, Rtc};
 use hal::sercom::I2CMaster3;
 use hal::time::{Hertz, KiloHertz};
 use ht16k33::{Dimming, Display, HT16K33};
 use pac::Peripherals;
-use rtic::app;
-use rtt_target::{rprintln, rtt_init, set_print_channel, UpChannel};
+use rtt_target::{rprintln, rtt_init_print, set_print_channel, UpChannel};
 use time_display::SegmentDisplayAdapter;
 
 const DISP_I2C_ADDR: u8 = 0x77;
@@ -368,51 +370,37 @@ fn rtt_init_done() {
     rprintln!("Initializing");
 }
 
-#[app(device = atsamd_hal::pac,  peripherals = true)]
-const APP: () = {
-    struct Resources {
+#[rtic::app(device = atsamd_hal::pac, peripherals = true, dispatchers = [SERCOM5])]
+mod app {
+    use super::*;
+    use systick_monotonic::*;
+
+    #[local]
+    struct Local {
+        timer: pac::TCC0,
+        last_second_marker: Option<u32>,
         dcf_pin: Pin<pin::PA02, PullUpInterrupt>,
         debug_pin: Pin<pin::PA17, PushPullOutput>,
-        eic: pac::EIC,
-        evsys: pac::EVSYS,
-        timer: pac::TCC0,
-        dcf77: DCF77Decoder,
-        rtc: Rtc<ClockMode>,
-        segment_display: SegmentDisplayAdapter,
         ticks: TickBuffer,
-        #[init(None)]
-        last_second_marker: Option<u32>,
-        #[init(false)]
-        tick: bool,
-        #[init(None)]
-        last_sync: Option<NaiveDateTime>,
-        #[init(0)]
-        sync_points: u8,
-        output2: UpChannel,
-        #[init(false)]
-        blinking: bool,
+        dcf77: DCF77Decoder,
         adc: Adc<pac::ADC>,
-        adc_pin: Pin<pin::PA07, Alternate<B>>
+        adc_pin: Pin<pin::PA07, Alternate<B>>,
     }
 
-    #[init(spawn=[])]
-    fn init(cx: init::Context) -> init::LateResources {
-        let channels = rtt_init! {
-            up: {
-                0: {
-                    size: 512
-                    mode: NoBlockSkip
-                    name: "Up zero"
-                }
-                1: {
-                    size: 5000
-                    mode: NoBlockSkip
-                    name: "Up one"
-                }
-            }
-        };
-        set_print_channel(channels.up.0);
-        let out2 = channels.up.1;
+    #[shared]
+    struct Shared {
+        rtc: Rtc<ClockMode>,
+        segment_display: SegmentDisplayAdapter,
+        last_sync: Option<NaiveDateTime>,
+        sync_points: u8,
+    }
+
+    #[monotonic(binds = SysTick, default = true)]
+    type SysTickMonotonic = Systick<100>;
+
+    #[init]
+    fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
+        rtt_init_print!();
         rtt_init_done();
 
         let mut device: Peripherals = cx.device;
@@ -422,7 +410,6 @@ const APP: () = {
             &mut device.SYSCTRL,
             &mut device.NVMCTRL,
         );
-
 
         let timer_clock = clocks
             .configure_gclk_divider_and_source(ClockGenId::GCLK3, 32, ClockSource::XOSC32K, true)
@@ -444,7 +431,10 @@ const APP: () = {
         let tc = clocks
             .configure_gclk_divider_and_source(ClockGenId::GCLK4, 250, ClockSource::DFLL48M, true) // clock divider 64, 3000 counts/s, clock period: 12000
             .expect("To set peripherals clock");
+        let freq: Hertz = tc.into();
         let timer_clock = clocks.tcc0_tcc1(&tc);
+        let systick = cx.core.SYST;
+        let mono = Systick::new(systick, freq.0);
         rprintln!(
             "Timer clock: {}",
             timer_clock.as_ref().map(|tck| tck.freq().0).unwrap_or(0)
@@ -483,22 +473,28 @@ const APP: () = {
 
         let adc = Adc::adc(device.ADC, &mut device.PM, &mut clocks);
         let adc_pin: Pin<pin::PA07, Alternate<B>> = pins.pa07.into();
-        cx.read_battery.spawn().unwrap();
+        read_battery::spawn().unwrap();
+
         rprintln!("Init successful");
-        init::LateResources {
-            dcf_pin,
-            debug_pin: output_pin,
-            timer,
-            eic: device.EIC,
-            evsys: device.EVSYS,
-            dcf77: DCF77Decoder::new(),
-            rtc,
-            segment_display,
-            ticks: TickBuffer::default(),
-            output2: out2,
-            adc,
-            adc_pin
-        }
+        (
+            Shared {
+                rtc,
+                segment_display,
+                last_sync: None,
+                sync_points: 0,
+            },
+            Local {
+                adc,
+                adc_pin,
+                timer,
+                last_second_marker: None,
+                dcf_pin,
+                debug_pin: output_pin,
+                ticks: TickBuffer::default(),
+                dcf77: DCF77Decoder::new(),
+            },
+            init::Monotonics(mono),
+        )
     }
 
     #[allow(clippy::empty_loop)]
@@ -508,36 +504,36 @@ const APP: () = {
         loop {}
     }
 
-    #[task(resources = [segment_display])]
-    fn show_tick(cx: show_tick::Context, tick: bool) {
-        cx.resources.segment_display.blink_second(tick);
+    #[task(shared = [segment_display])]
+    fn show_tick(mut cx: show_tick::Context, tick: bool) {
+        cx.shared.segment_display.lock(|sd| sd.blink_second(tick));
     }
 
-    #[task(resources = [segment_display, adc, adc_pin, blinking], schedule=[read_battery])]
+    #[task(shared = [segment_display], local=[adc, adc_pin, blinking:bool = false])]
     fn read_battery(mut cx: read_battery::Context) {
-        const RESOLUTION_BITS:u32 = 10;
-        let data: u16 = cx.resources.adc.read(cx.resources.adc_pin).unwrap();
+        const RESOLUTION_BITS: u32 = 12;
+        let data: u16 = cx.local.adc.read(cx.local.adc_pin).unwrap();
         let max_range = 1 << RESOLUTION_BITS;
-        let voltage = ((data as f32) * 3.3) / (max_range as f32);
+        let voltage = ((data as f32) * 3.3 * 2.0) / (max_range as f32);
         rprintln!("Battery level {} - {}", voltage, data);
         let mid = max_range >> 1;
-        if data < mid + max_range / 4 && *cx.resources.blinking {
-            *cx.resources.blinking = true;
-            cx.resources.segment_display.lock(|sd| sd.blink_all(true));
-        } 
-        if data > mid + max_range / 2 && *cx.resources.blinking {
-            *cx.resources.blinking = false;
-            cx.resources.segment_display.lock(|sd| sd.blink_all(false));
+        if data < mid + max_range / 4 && *cx.local.blinking {
+            *cx.local.blinking = true;
+            cx.shared.segment_display.lock(|sd| sd.blink_all(true));
+        }
+        if data > mid + max_range / 2 && *cx.local.blinking {
+            *cx.local.blinking = false;
+            cx.shared.segment_display.lock(|sd| sd.blink_all(false));
         }
 
-        cx.schedule.read_battery(48_000_000*60).ok();
+        read_battery::spawn_after(60.secs()).ok();
     }
 
-    #[task(resources = [segment_display, last_sync, rtc])]
+    #[task(shared = [segment_display, last_sync, rtc])]
     fn show_time(mut cx: show_time::Context, sync_points: u8) {
         rprintln!("Show time");
-        if cx.resources.last_sync.lock(|ls| ls.clone()).is_some() {
-            let (h, m) = cx.resources.rtc.lock(|rtc| {
+        if cx.shared.last_sync.lock(|ls| ls.clone()).is_some() {
+            let (h, m) = cx.shared.rtc.lock(|rtc| {
                 let h = rtc.current_time().hours;
                 let m = rtc.current_time().minutes;
                 (h, m)
@@ -548,20 +544,24 @@ const APP: () = {
                 _ => h,
             };
 
-            cx.resources.segment_display.display_time(hours, m, sync_points);
+            cx.shared.segment_display.lock(|sd| {
+                sd.display_time(hours, m, sync_points);
+            });
         } else {
-            cx.resources.segment_display.display_error(sync_points);
+            cx.shared
+                .segment_display
+                .lock(|sd| sd.display_error(sync_points));
         }
     }
 
-    #[task(binds = TCC0, priority=8, resources=[timer, dcf_pin, debug_pin, dcf77, rtc, last_sync, output2, sync_points, evsys, ticks, last_second_marker], spawn=[show_tick, show_time])]
-    fn tcc0(cx: tcc0::Context) {
-        let dcf_pin = cx.resources.dcf_pin;
-        let decoder = cx.resources.dcf77;
-        let debug_pin = cx.resources.debug_pin;
-        let timer: &mut pac::TCC0 = cx.resources.timer;
+    #[task(binds = TCC0, priority=4, shared=[rtc, last_sync, sync_points], local=[debug_pin, timer, last_second_marker, dcf_pin, ticks, dcf77])]
+    fn tcc0(mut cx: tcc0::Context) {
+        let dcf_pin = cx.local.dcf_pin;
+        let decoder = cx.local.dcf77;
+        let debug_pin = cx.local.debug_pin;
+        let timer: &mut pac::TCC0 = cx.local.timer;
         let flags = timer.intflag.read();
-        let binner = cx.resources.ticks;
+        let binner = cx.local.ticks;
         if flags.err().bit_is_set() {
             rprintln!("Error");
             timer.intflag.modify(|_, w| w.err().set_bit());
@@ -577,13 +577,10 @@ const APP: () = {
             let should_print = binner.tick_count == PHASE_MAX - 1;
             binner.add_tick(tick, edge);
 
-            if should_print {
-                writeln!(cx.resources.output2, "{}", binner).expect("to write data");
-            }
-            cx.spawn.show_tick(!level_low).ok();
+            show_tick::spawn(!level_low).ok();
             if level_low && binner.down_edge_in_phase(tick) {
                 debug_pin.set_low().unwrap();
-                let last_second_marker = cx.resources.last_second_marker;
+                let last_second_marker = cx.local.last_second_marker;
                 if minute_detected(cc0, *last_second_marker) {
                     decoder.add_minute()
                 }
@@ -605,17 +602,20 @@ const APP: () = {
                     rprintln!("Decoding error: {:?}", err);
                 }
                 Ok(dt) => {
-                    sync_rtc(cx.resources.rtc, &dt);
-                    *cx.resources.sync_points |= 1;
-                    cx.spawn.show_time(*cx.resources.sync_points).ok();
-                    cx.resources.last_sync.replace(dt);
+                    cx.shared.rtc.lock(|rtc| sync_rtc(rtc, &dt));
+                    let sync_points = cx.shared.sync_points.lock(|sp| {
+                        *sp |= 1;
+                        *sp
+                    });
+                    show_time::spawn(sync_points).ok();
+                    cx.shared.last_sync.lock(|ls| ls.replace(dt));
                     rprintln!("Good date: {:?}", dt);
                 }
             }
         }
     }
 
-    #[task(binds = RTC, resources=[sync_points], spawn=[show_time])]
+    #[task(binds = RTC, shared=[sync_points])]
     fn rtc(mut cx: rtc::Context) {
         let int_flags = unsafe {
             let rtc = (*pac::RTC::ptr()).mode2_mut();
@@ -624,15 +624,11 @@ const APP: () = {
             flag_bits
         };
         rprintln!("RTC interrupt {:#x}", int_flags);
-        let old_sync_points = cx.resources.sync_points.lock(|sp| {
+        let old_sync_points = cx.shared.sync_points.lock(|sp| {
             let old_sp = *sp;
             *sp = *sp << 1;
             old_sp
         });
-        cx.spawn.show_time(old_sync_points).ok();
+        show_time::spawn(old_sync_points).ok();
     }
-
-    extern "C" {
-        fn SERCOM5();
-    }
-};
+}

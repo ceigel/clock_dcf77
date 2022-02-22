@@ -7,19 +7,20 @@ version = "0.1.0"
 
 [dependencies]
 cortex-m = "0.7.1"
-cortex-m-rtic = "0.5.8"
+cortex-m-rtic = "1.0.0"
+cortex-m-rt = "0.7.1"
 panic-rtt-target = {version="0.1.2", features = ["cortex-m"] }
 rtt-target = {version= "0.3.1",  features = ["cortex-m"] }
 chrono = { version = "0.4.19", default-features = false }
 rtcc = "0.2.1"
 ht16k33 = { version = "0.4.0", default-features = false }
 adafruit-7segment = { version = "0.1.0", default-features = false  }
+systick-monotonic = "1.0.0"
 
 
 [dependencies.atsamd-hal]
-version = "0.13.0"
-features = [ "samd21g-rt", "unproven"]
-path = "/Users/cristian.eigel/tmp/atsamd/hal"
+version = "0.14.0"
+features = ["samd21g-rt", "samd21g", "rtic", "unproven"]
 
 [profile.dev]
 debug=true
