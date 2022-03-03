@@ -10,7 +10,6 @@ use panic_rtt_target as _;
 use atsamd_hal as hal;
 use atsamd_hal::pac;
 use chrono::{naive::NaiveDateTime, Datelike, Timelike};
-use core::fmt::Write;
 use datetime_converter::DCF77DateTimeConverter;
 use dcf77_decoder::DCF77Decoder;
 use hal::adc::Adc;
@@ -26,7 +25,7 @@ use hal::sercom::I2CMaster3;
 use hal::time::{Hertz, KiloHertz};
 use ht16k33::{Dimming, Display, HT16K33};
 use pac::Peripherals;
-use rtt_target::{rprintln, rtt_init_print, set_print_channel, UpChannel};
+use rtt_target::{rprintln, rtt_init_print};
 use time_display::SegmentDisplayAdapter;
 
 const DISP_I2C_ADDR: u8 = 0x77;
@@ -50,11 +49,25 @@ fn sync_rtc(rtc: &mut Rtc<ClockMode>, dt: &NaiveDateTime) {
     };
     rtc.set_time(time);
 }
+fn increment_vals(slice: &mut [u8], add: i8) {
+    for a in slice {
+        if add > 0 {
+            *a = a.saturating_add(add as u8);
+        } else {
+            *a = a.saturating_sub(-add as u8);
+        }
+    }
+}
+
+#[derive(PartialEq, Debug, Copy, Clone)]
+pub enum Edge {
+    Down,
+    Up,
+}
 
 pub struct TickBuffer {
     pub phase: Option<usize>,
     pub counts: [u8; 1000],
-    pub integral: [u32; 1000],
     max_val: u8,
     down_edge: Option<u32>,
     up_edge: Option<u32>,
@@ -68,7 +81,6 @@ impl Default for TickBuffer {
         Self {
             phase: None,
             counts: [0; 1000],
-            integral: [0; 1000],
             max_val: 0,
             down_edge: None,
             up_edge: None,
@@ -86,28 +98,8 @@ impl core::fmt::Display for TickBuffer {
             formatter.write_fmt(format_args!(", {}", x))?;
         }
         formatter.write_fmt(format_args!("]; "))?;
-        formatter.write_fmt(format_args!("integral = [ {}", self.integral[0]))?;
-        for x in &self.integral[1..] {
-            formatter.write_fmt(format_args!(", {}", x))?;
-        }
         formatter.write_fmt(format_args!("]"))
     }
-}
-
-fn increment_vals(slice: &mut [u8], add: i8) {
-    for a in slice {
-        if add > 0 {
-            *a = a.saturating_add(add as u8);
-        } else {
-            *a = a.saturating_sub(-add as u8);
-        }
-    }
-}
-
-#[derive(PartialEq, Debug, Copy, Clone)]
-pub enum Edge {
-    Down,
-    Up,
 }
 
 impl TickBuffer {
@@ -209,7 +201,6 @@ impl TickBuffer {
                 self.integral_max = integral;
                 max_index = idx;
             }
-            self.integral[idx] = integral;
             integral = integral.saturating_sub((self.counts[idx] as u32) * (STEPS as u32));
             for p in 0..STEPS {
                 let step = (p + 1) * WINDOW_SIZE;
@@ -358,8 +349,10 @@ fn init_i2c(
     sda: impl Into<Sda>,
     scl: impl Into<Scl>,
 ) -> I2C {
-    let gclk0 = clocks.gclk0();
-    let clock = &clocks.sercom3_core(&gclk0).unwrap();
+    let i2cc = clocks.get_gclk(ClockGenId::GCLK0).unwrap();
+    let freq: Hertz = i2cc.into();
+    rprintln!("I2c clock: {}", freq.0);
+    let clock = &clocks.sercom3_core(&i2cc).unwrap();
     let baud = baud.into();
     let sda = sda.into();
     let scl = scl.into();
@@ -431,7 +424,7 @@ mod app {
         let tc = clocks
             .configure_gclk_divider_and_source(ClockGenId::GCLK4, 250, ClockSource::DFLL48M, true) // clock divider 64, 3000 counts/s, clock period: 12000
             .expect("To set peripherals clock");
-        let freq: Hertz = tc.into();
+        let freq: Hertz = clocks.gclk0().into();
         let timer_clock = clocks.tcc0_tcc1(&tc);
         let systick = cx.core.SYST;
         let mono = Systick::new(systick, freq.0);
@@ -473,7 +466,10 @@ mod app {
 
         let adc = Adc::adc(device.ADC, &mut device.PM, &mut clocks);
         let adc_pin: Pin<pin::PA07, Alternate<B>> = pins.pa07.into();
+
+        device.PM.sleep.write(|w| w.idle().ahb());
         read_battery::spawn().unwrap();
+        let ticks = TickBuffer::default();
 
         rprintln!("Init successful");
         (
@@ -490,7 +486,7 @@ mod app {
                 last_second_marker: None,
                 dcf_pin,
                 debug_pin: output_pin,
-                ticks: TickBuffer::default(),
+                ticks,
                 dcf77: DCF77Decoder::new(),
             },
             init::Monotonics(mono),
@@ -501,7 +497,9 @@ mod app {
     #[idle()]
     fn idle(_cx: idle::Context) -> ! {
         rprintln!("idle");
-        loop {}
+        loop {
+            rtic::export::wfi();
+        }
     }
 
     #[task(shared = [segment_display])]
@@ -512,21 +510,29 @@ mod app {
     #[task(shared = [segment_display], local=[adc, adc_pin, blinking:bool = false])]
     fn read_battery(mut cx: read_battery::Context) {
         const RESOLUTION_BITS: u32 = 12;
-        let data: u16 = cx.local.adc.read(cx.local.adc_pin).unwrap();
-        let max_range = 1 << RESOLUTION_BITS;
-        let voltage = ((data as f32) * 3.3 * 2.0) / (max_range as f32);
-        rprintln!("Battery level {} - {}", voltage, data);
-        let mid = max_range >> 1;
-        if data < mid + max_range / 4 && *cx.local.blinking {
+        const MAX_RANGE: u32 = 1 << RESOLUTION_BITS;
+        const MID: u32 = MAX_RANGE >> 1;
+        const CHARGING_START: u32 = MID + MAX_RANGE / 25;
+        const CHARGING_END: u32 = CHARGING_START + MAX_RANGE / 25;
+        let data: u32 = cx.local.adc.read(cx.local.adc_pin).unwrap();
+        let voltage = ((data as f32) * 3.3 * 2.0) / (MAX_RANGE as f32);
+        let needs_charging = data < CHARGING_START;
+        let needs_charging_str = if needs_charging {
+            " (needs charging)"
+        } else {
+            ""
+        };
+        rprintln!("Battery level {} - {}{}", voltage, data, needs_charging_str);
+        if needs_charging && *cx.local.blinking == false {
             *cx.local.blinking = true;
             cx.shared.segment_display.lock(|sd| sd.blink_all(true));
         }
-        if data > mid + max_range / 2 && *cx.local.blinking {
+        if data > CHARGING_END && *cx.local.blinking {
             *cx.local.blinking = false;
             cx.shared.segment_display.lock(|sd| sd.blink_all(false));
         }
 
-        read_battery::spawn_after(60.secs()).ok();
+        read_battery::spawn_after(60.secs()).unwrap();
     }
 
     #[task(shared = [segment_display, last_sync, rtc])]
@@ -574,7 +580,6 @@ mod app {
 
             let tick = cc0 % 1000;
             rprintln!("{} - {}", tick, level_low);
-            let should_print = binner.tick_count == PHASE_MAX - 1;
             binner.add_tick(tick, edge);
 
             show_tick::spawn(!level_low).ok();

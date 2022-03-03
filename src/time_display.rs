@@ -10,11 +10,11 @@ impl SegmentDisplayAdapter {
     pub fn new(mut display: SegmentDisplay) -> Self {
         display.initialize().expect("Failed to initialize ht16k33");
         display
+            .set_dimming(Dimming::BRIGHTNESS_1_16)
+            .expect("Could not set dimming!");
+        display
             .set_display(Display::ON)
             .expect("Could not turn on the display!");
-        display
-            .set_dimming(Dimming::BRIGHTNESS_MIN)
-            .expect("Could not set dimming!");
         Self { display }
     }
 
@@ -59,7 +59,7 @@ impl SegmentDisplayAdapter {
     pub fn blink_all(&mut self, blink_on: bool) {
         if blink_on {
             self.display
-                .set_display(Display::TWO_HZ)
+                .set_display(Display::ONE_HZ)
                 .expect("Could not turn on the display!");
         } else {
             self.display
